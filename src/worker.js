@@ -535,7 +535,7 @@ async function getSignKey(env) {
   _signKey = null;
   try {
     if (env && env.CTCL_SIGN_KEY) {
-      const der = Uint8Array.from(atob(env.CTCL_SIGN_KEY), (c) => c.charCodeAt(0));
+      const der = Uint8Array.from(atob(env.CTCL_SIGN_KEY.replace(/\s+/g, "")), (c) => c.charCodeAt(0));
       _signKey = await crypto.subtle.importKey("pkcs8", der, { name: "Ed25519" }, true, ["sign"]);
     }
   } catch (e) { _signKey = null; }
