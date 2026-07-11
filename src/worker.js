@@ -481,6 +481,92 @@ async function expandGroup(id, req, env) {
   }, {}, "no-store");
 }
 
+// ---- Boundary Inspector (P2 — CommonInstant Web whitepaper §5.6/§8.1) -----
+// B(I,S) in {normal, gap, fold, pause, rate_change}. A PROACTIVE pre-flight check —
+// unlike /v1/convert (which fails on ambiguity), this always returns a status so an
+// agent can ask "is this time/system state safe?" before committing to it.
+
+// Scan forward from `ns` for up to `windowHours` for an IANA offset change (coarse
+// hourly probe, then binary-search the transition minute). No external tzdb transition
+// table needed — just repeated Intl offset reads, which is cheap at this resolution.
+function scanTzTransitions(tz, ns, windowHours) {
+  const startMs = Number(ns / NS_PER.ms);
+  const hours = Math.max(1, Math.min(24 * 30, windowHours));
+  let prevOff = tzOffsetMinutes(startMs, tz);
+  const found = [];
+  for (let h = 1; h <= hours; h++) {
+    const ms = startMs + h * 3600000;
+    const off = tzOffsetMinutes(ms, tz);
+    if (off !== prevOff) {
+      let lo = ms - 3600000, hi = ms;
+      while (hi - lo > 60000) {
+        const mid = lo + Math.floor((hi - lo) / 2);
+        if (tzOffsetMinutes(mid, tz) === prevOff) lo = mid; else hi = mid;
+      }
+      found.push({ at: rfc3339(BigInt(hi) * NS_PER.ms, "UTC"), offset_before_min: prevOff, offset_after_min: off });
+      prevOff = off;
+    }
+  }
+  return found;
+}
+
+async function inspectBoundary(req, env) {
+  let body;
+  try { body = await req.json(); } catch { return fail("INVALID_TIME_VALUE", "body must be JSON"); }
+
+  if (body.timezone != null || body.local_value != null) {
+    if (!body.timezone || !body.local_value) return fail("INVALID_TIME_VALUE", "timezone + local_value required together (e.g. {timezone:'America/New_York', local_value:'2026-03-08T02:30:00'})");
+    let res;
+    try { res = localToUtc(body.local_value, body.timezone); }
+    catch (e) { return fail("INVALID_TIMEZONE", `unrecognized IANA timezone: ${body.timezone}`); }
+    if (res.candidates.length === 0)
+      return ok({ kind: "timezone", timezone: body.timezone, local_value: body.local_value, status: "gap", safe: false,
+        detail: { note: "this local time does not exist (DST spring-forward gap)" } });
+    if (res.candidates.length > 1)
+      return ok({ kind: "timezone", timezone: body.timezone, local_value: body.local_value, status: "fold", safe: false,
+        detail: { candidates: res.candidates.map((c) => rfc3339(BigInt(c) * NS_PER.ms, "UTC")),
+          note: "this local time is ambiguous (DST fall-back overlap); pass an explicit offset to disambiguate" } });
+    const ns = BigInt(res.candidates[0]) * NS_PER.ms;
+    const windowHours = Number(body.window_hours) || 48;
+    return ok({ kind: "timezone", timezone: body.timezone, local_value: body.local_value, status: "normal", safe: true,
+      resolved_utc: rfc3339(ns, "UTC"), upcoming_transitions: scanTzTransitions(body.timezone, ns, windowHours) });
+  }
+
+  if (body.system_id) {
+    if (!env || !env.CTCL_KV) return kvMissing();
+    const raw = await env.CTCL_KV.get("system:" + body.system_id);
+    if (!raw) return fail("UNKNOWN_SYSTEM", `no such system: ${body.system_id}`, {}, 404);
+    const sys = JSON.parse(raw);
+    let ns;
+    try { ns = body.value != null ? toNs(body.value, body.encoding) : BigInt(Date.now()) * NS_PER.ms; }
+    catch (e) { return fail(e.code || "INVALID_TIME_VALUE", e.msg || String(e)); }
+    let epochNs;
+    try { epochNs = toNs(sys.epoch?.parent_value ?? 0, sys.epoch?.encoding || "unix_s"); }
+    catch { epochNs = 0n; }
+    const parentSec = Number(ns) / 1e9, epochSec = Number(epochNs) / 1e9;
+    const rate = sys.rate || { type: "constant" };
+    if (rate.type === "paused") {
+      const inPause = (rate.pauses || []).some((pz) => parentSec >= Number(pz.from) && parentSec < (pz.to == null ? Infinity : Number(pz.to)));
+      return ok({ kind: "system", system_id: sys.id, instant: { unix_ns: ns.toString() }, status: inPause ? "pause" : "normal", safe: !inPause,
+        detail: inPause ? { note: "instant falls inside a paused segment; active-time excludes it (§25)" } : {} });
+    }
+    if (rate.type === "piecewise") {
+      const TOL_S = 60; // "near" a segment boundary, in seconds
+      let nearBoundary = null;
+      for (const seg of (rate.segments || [])) {
+        if (seg.until == null) continue;
+        if (Math.abs(parentSec - Number(seg.until)) <= TOL_S) { nearBoundary = Number(seg.until); break; }
+      }
+      return ok({ kind: "system", system_id: sys.id, instant: { unix_ns: ns.toString() },
+        status: nearBoundary != null ? "rate_change" : "normal", safe: nearBoundary == null,
+        detail: nearBoundary != null ? { boundary_at_unix_s: nearBoundary, tolerance_s: TOL_S } : {} });
+    }
+    return ok({ kind: "system", system_id: sys.id, instant: { unix_ns: ns.toString() }, status: "normal", safe: true, detail: {} });
+  }
+
+  return fail("INVALID_TIME_VALUE", "provide either {timezone, local_value, window_hours?} or {system_id, value?, encoding?}");
+}
+
 // ---- endpoints -------------------------------------------------------------
 
 async function handleConvert(req) {
@@ -583,6 +669,8 @@ function toolDeclaration(origin) {
       { name: "list-groups", method: "GET", path: "/v1/temporal-groups", desc: "List all stored Temporal Groups.", input: {}, output: "group ids" },
       { name: "expand-group", method: "POST", path: "/v1/temporal-groups/{id}/expand", desc: "THE CommonInstant Web flagship: project ONE instant across every member of a group — E(I*, G) = {τ1,...,τn}, \"One Instant, Many Systems\". Default instant is now; pass instant_id to align on a previously-registered I*, or an explicit value+encoding.",
         input: { instant_id: "string?", value: "string?", encoding: "string?" }, output: "instant + members[] (each with its local representation)" },
+      { name: "inspect-boundary", method: "POST", path: "/v1/boundaries/inspect", desc: "Proactive pre-flight check (§5.6): is this local time / custom-system state safe? Unlike /v1/convert, never errors — always returns a status: normal|gap|fold (timezone) or normal|pause|rate_change (system), plus upcoming DST transitions within a window.",
+        input: { timezone: "IANA?", local_value: "naive local datetime string?", window_hours: "number? (default 48)" }, input_alt: { system_id: "string?", value: "string?", encoding: "string?" }, output: "status + safe + detail" },
       { name: "validate", method: "POST", path: "/v1/validate", desc: "Validate a time value; returns warnings (POSIX-vs-UTC leap drift, out-of-range).", input: { value: "string", encoding: "unix_s|…", timescale: "utc|posix?" }, output: "valid + warnings + canonical_unix_ns" },
       { name: "transform-types", method: "GET", path: "/v1/transforms", desc: "Catalog of transform types (§12): identity, offset, linear_rate, piecewise, paused_clock (active-time), …", input: {}, output: "types + which are implemented" },
       { name: "version", method: "GET", path: "/v1/version", desc: "Versions, leap table, precision tiers (§35), trust tiers (§36), rate-limit policy (§38).", input: {}, output: "versions + tiers" },
@@ -616,6 +704,7 @@ function openapi(origin) {
       "/v1/temporal-groups": { get: { summary: "List Temporal Groups", responses: { 200: { description: "ok" } } }, post: { summary: "Create/update a Temporal Group", responses: { 200: { description: "ok" } } } },
       "/v1/temporal-groups/{id}": { get: { summary: "Get a Temporal Group definition", responses: { 200: { description: "ok" }, 404: { description: "unknown group" } } } },
       "/v1/temporal-groups/{id}/expand": { post: { summary: "One Instant, Many Systems: expand an instant across every group member", responses: { 200: { description: "ok" }, 404: { description: "unknown group/instant" } } } },
+      "/v1/boundaries/inspect": { post: { summary: "Boundary Inspector (§5.6): proactive gap/fold/pause/rate_change status check", responses: { 200: { description: "ok" } } } },
       "/v1/validate": { post: { summary: "Validate a time object (§41)", responses: { 200: { description: "ok" } } } },
       "/v1/transforms": { get: { summary: "Transform-type catalog (§12)", responses: { 200: { description: "ok" } } } },
       "/v1/transforms/{id}": { get: { summary: "A transform type's spec", responses: { 200: { description: "ok" }, 404: { description: "unknown" } } } },
@@ -722,6 +811,9 @@ export function CTCL(base = '${origin}') {
     listGroups:  async () => D(await j('/v1/temporal-groups')),
     expandGroup: async (id, opts = {}) => D(await post('/v1/temporal-groups/' + encodeURIComponent(id) + '/expand', opts)),
 
+    // ---- Boundary Inspector: proactive gap/fold/pause/rate_change check (§5.6) --
+    inspectBoundary: async (input) => D(await post('/v1/boundaries/inspect', input)),
+
     // ---- §23 long-term memory: stamp an entry with verified instants ----------
     // Returns a record to STORE VERBATIM; separates event / write / recall time (§10.4).
     stampMemory: async (content, eventInstantId) => {
@@ -806,6 +898,7 @@ export default {
       if (rest.endsWith("/expand")) return expandGroup(rest.slice(0, -7), request, env);
       return getGroup(rest, env);
     }
+    if (p === "/v1/boundaries/inspect" && request.method === "POST") return inspectBoundary(request, env);
     if (p === "/v1/path") return transformPath(url, env);
     if (p === "/v1/validate" && request.method === "POST") return validateTime(request);
     if (p === "/v1/transforms") return transformsCatalog(null);
@@ -1019,6 +1112,7 @@ footer a{color:var(--dim)}
    <div class="ep"><span class="m">POST</span><span class="path">/v1/systems</span><span class="d" data-zh="建立持久自定義世界時鐘">persist a custom world clock</span></div>
    <div class="ep"><span class="m">GET</span><span class="path">/v1/systems/{id}/now</span><span class="d" data-zh="該世界當前時間＋世界曆">current time in that world + world calendar</span></div>
    <div class="ep"><span class="m">POST</span><span class="path">/v1/temporal-groups/{id}/expand</span><span class="d" data-zh="一瞬間展開到群組內每個系統（Web 旗艦功能）">project one instant across every system in a group (flagship Web feature)</span></div>
+   <div class="ep"><span class="m">POST</span><span class="path">/v1/boundaries/inspect</span><span class="d" data-zh="主動檢查 DST gap／fold／暫停／速率變化，從不報錯">proactive gap／fold／pause／rate-change check, never errors</span></div>
    <div class="ep"><span class="m">GET</span><span class="path">/ai/ctcl.json</span><span class="d" data-zh="agent 工具宣告 —— 先讀這個">agent tool declaration — read this first</span></div>
   </div>
  </section>
@@ -1056,6 +1150,17 @@ curl -s ${origin}/v1/instant/ctcl:instant:…</pre>
    <button class="btn pri" id="ggo" data-zh="展開此刻 →">expand this instant →</button>
   </div>
   <pre id="gout">…</pre>
+ </section>
+
+ <section>
+  <div class="label" data-zh="邊界檢查器">Boundary Inspector</div>
+  <p data-zh="主動檢查一個地方時間是否安全 —— DST gap（不存在）、fold（模糊）或正常。與 /v1/convert 不同，這裡從不報錯，永遠回傳一個狀態。下面預設是 2026 年美東的春令跳時（不存在的 02:30）。">Proactively check whether a local time is safe — DST gap (nonexistent), fold (ambiguous), or normal. Unlike /v1/convert, this never errors — it always returns a status. The default below is 2026's US Eastern spring-forward gap (02:30 doesn't exist).</p>
+  <div class="pg">
+   <label class="mono" style="color:var(--faint);font-size:.75rem">local <input id="bv" value="2026-03-08T02:30:00" aria-label="Naive local datetime" style="width:190px"></label>
+   <label class="mono" style="color:var(--faint);font-size:.75rem">tz <input id="btz" value="America/New_York" aria-label="IANA timezone"></label>
+   <button class="btn pri" id="bgo" data-zh="檢查 →">inspect →</button>
+  </div>
+  <pre id="bout">…</pre>
  </section>
 
  <footer>
@@ -1141,5 +1246,9 @@ async function tryExpand(){var gid='demo:one-instant-many-systems';
   $('gout').textContent=JSON.stringify(r.ok?r.data:r,null,2);
  }catch(e){$('gout').textContent=String(e)}}
 $('ggo').addEventListener('click',tryExpand);
+// boundary inspector
+async function tryInspect(){var body={timezone:$('btz').value,local_value:$('bv').value};
+ try{var r=await(await fetch(O+'/v1/boundaries/inspect',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();$('bout').textContent=JSON.stringify(r.ok?r.data:r,null,2)}catch(e){$('bout').textContent=String(e)}}
+$('bgo').addEventListener('click',tryInspect);
 </script></body></html>`;
 }
