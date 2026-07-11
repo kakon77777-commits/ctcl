@@ -53,6 +53,7 @@ that first.
 | `POST /v1/temporal-groups` · `GET /v1/temporal-groups` · `/{id}` · `POST /{id}/expand` | **Temporal Groups** — "One Instant, Many Systems": project one instant across every member (builtin timescale \| `tz:<IANA>` \| custom system id) in a single call |
 | `POST /v1/boundaries/inspect` | **Boundary Inspector** — proactive gap/fold/pause/rate_change status check + upcoming DST transitions; never errors, unlike `/v1/convert` |
 | `POST /v1/resolve` | **Semantic Resolution** — `resolve_temporal_context`: ambiguous input (city, alias, tz abbreviation) → IANA candidates + confidence; never silently disambiguates |
+| `POST /v1/planner/shared-instant` · `GET /v1/planner/constraint-types` | **Constraint Planner** — `plan_shared_instant`: I\* = argmax_I U(I \| constraints) over a bounded search window; weighted `weekday_hours`/`avoid_window`/`prefer_window`/`min_lead_time`/`system_not_paused`/`market_hours` |
 | `POST /v1/validate` | validate a time object |
 | `GET /v1/transforms(/{id})` | transform-type catalog (§12) |
 | `GET /v1/timescales` · `GET /v1/encodings` · `GET /v1/version` | supported timescales / encodings / versions + precision & trust tiers |
@@ -116,7 +117,17 @@ places) plus exact-IANA-id and fuzzy-substring fallbacks. Deliberately scoped: g
 ambiguous input (e.g. `"CST"` → US Central *or* China Standard) returns both candidates
 at reduced confidence instead of picking one, and free-form natural-language phrases
 (`"tomorrow 3pm"`) return an honest empty result rather than a guess — consistent with
-§6.3 ("don't silently resolve ambiguity"). Remaining Web-whitepaper priorities: P3
-persisted-group polish, P6 constraint planner (`plan_shared_instant`).
+§6.3 ("don't silently resolve ambiguity"). **P6 — Constraint Planner shipped 2026-07-11**:
+`POST /v1/planner/shared-instant` (`plan_shared_instant`) samples a bounded search window
+(max 1000 candidates) and scores each against weighted constraints, returning the best
+instant + up to 3 distinct alternatives + a plain-language explanation.
+`GET /v1/planner/constraint-types` documents which constraint types are honestly
+implemented (`weekday_hours`, `avoid_window`, `prefer_window`, `min_lead_time`,
+`system_not_paused`, an approximate `market_hours` with an explicit no-holiday-calendar
+caveat) versus explicitly declared unimplemented (`gpu_availability`, `simulation_state`
+— no external data feed) rather than faked. **This closes all six P0–P6 priorities from
+the CommonInstant Web whitepaper** (P0/P3 were already satisfied by earlier work — P3
+"persist commonly-used systems as a versioned resource" is exactly what the P1 Temporal
+Groups implementation already does).
 
 Migrated out of the `unbounded-axiom` repo into this standalone project on 2026-07-11.

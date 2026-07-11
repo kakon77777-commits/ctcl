@@ -724,6 +724,110 @@ async function handleResolve(req) {
   return ok(resolveTemporalContext(body.input));
 }
 
+// ---- Constraint Planner (P6 — CommonInstant Web whitepaper §7/§8.1) -------
+// plan_shared_instant: I* = argmax_I U(I | C1..Cn). The whitepaper is explicit this is
+// NOT a full meeting-scheduler SaaS — a demonstration of CTCL-native constraint solving
+// over a bounded window. Constraint types are limited to what this Worker can HONESTLY
+// compute with no external data feed: no real market/holiday calendars, no live GPU
+// telemetry. Those are declared `implemented: false` rather than faked.
+const CONSTRAINT_TYPES = {
+  weekday_hours: { desc: "instant falls within local civil hours on given weekdays", params: ["timezone", "days (0=Sun..6=Sat)", "start (HH:MM)", "end (HH:MM)"], implemented: true },
+  avoid_window: { desc: "instant must NOT fall within [from, to) unix_s", params: ["from", "to"], implemented: true },
+  prefer_window: { desc: "instant SHOULD fall within [from, to) unix_s — soft preference", params: ["from", "to"], implemented: true },
+  min_lead_time: { desc: "instant must be at least `seconds` after the request time", params: ["seconds"], implemented: true },
+  system_not_paused: { desc: "a stored custom system must not be in a paused segment at the instant", params: ["system_id"], implemented: true },
+  market_hours: { desc: "weekday + local-hours only, NO holiday calendar — an honest approximation, not a real exchange calendar", params: ["timezone", "start", "end"], implemented: true, caveat: "no holiday awareness; do not use for real trading decisions" },
+  gpu_availability: { desc: "requires an external telemetry feed this deployment does not have", implemented: false },
+  simulation_state: { desc: "requires integration with a specific simulator this deployment does not have", implemented: false },
+};
+function constraintTypesCatalog() {
+  return ok({ count: Object.keys(CONSTRAINT_TYPES).length, implemented: Object.keys(CONSTRAINT_TYPES).filter((k) => CONSTRAINT_TYPES[k].implemented), types: CONSTRAINT_TYPES });
+}
+function parseHM(s) { const m = String(s).match(/^(\d{1,2}):(\d{2})$/); return m ? Number(m[1]) * 60 + Number(m[2]) : null; }
+
+function checkConstraint(c, unixS, requestUnixS) {
+  const type = c.type;
+  if (type === "weekday_hours" || type === "market_hours") {
+    const tz = c.timezone || "UTC";
+    let off; try { off = tzOffsetMinutes(unixS * 1000, tz); } catch { return { ok: false, reason: "invalid timezone" }; }
+    const d = new Date(unixS * 1000 + off * 60000);
+    const dow = d.getUTCDay(), minsOfDay = d.getUTCHours() * 60 + d.getUTCMinutes();
+    const days = type === "market_hours" ? [1, 2, 3, 4, 5] : (Array.isArray(c.days) ? c.days : [1, 2, 3, 4, 5]);
+    const startM = parseHM(c.start || "09:00"), endM = parseHM(c.end || "18:00");
+    const ok = days.includes(dow) && startM != null && endM != null && minsOfDay >= startM && minsOfDay < endM;
+    return { ok, reason: ok ? null : "outside weekday/hours window" };
+  }
+  if (type === "avoid_window") {
+    const inWin = unixS >= Number(c.from) && unixS < Number(c.to);
+    return { ok: !inWin, reason: inWin ? "inside avoided window" : null };
+  }
+  if (type === "prefer_window") {
+    const inWin = unixS >= Number(c.from) && unixS < Number(c.to);
+    return { ok: inWin, reason: inWin ? null : "outside preferred window (soft)" };
+  }
+  if (type === "min_lead_time") {
+    const ok = unixS >= requestUnixS + Number(c.seconds || 0);
+    return { ok, reason: ok ? null : "too soon (lead time not met)" };
+  }
+  return { ok: null, unsupported: true, reason: "unsupported constraint type: " + type };
+}
+
+async function planSharedInstant(req, env) {
+  let body;
+  try { body = await req.json(); } catch { return fail("INVALID_TIME_VALUE", "body must be JSON"); }
+  const win = body.window || {};
+  const from = Number(win.from), to = Number(win.to), step = Number(win.step_s || 900);
+  if (!(from < to) || !(step > 0)) return fail("INVALID_TIME_VALUE", "window.from < window.to and window.step_s > 0 required (unix_s)");
+  const steps = Math.floor((to - from) / step);
+  const MAX_SAMPLES = 1000;
+  if (steps > MAX_SAMPLES) return fail("INVALID_TIME_VALUE", `window too large: ~${steps} samples at step_s=${step} (max ${MAX_SAMPLES}). Widen step_s or narrow the window.`, { steps, max: MAX_SAMPLES });
+  const constraints = Array.isArray(body.constraints) ? body.constraints : [];
+  if (!constraints.length) return fail("INVALID_TIME_VALUE", "constraints must be a non-empty array");
+  // system_not_paused needs a KV lookup per system id — resolve once, not once per candidate
+  const sysCache = {};
+  for (const c of constraints) {
+    if (c.type === "system_not_paused" && c.system_id && !(c.system_id in sysCache))
+      sysCache[c.system_id] = (env && env.CTCL_KV) ? await env.CTCL_KV.get("system:" + c.system_id) : null;
+  }
+  const requestUnixS = Date.now() / 1000;
+  const totalWeight = constraints.reduce((s, c) => s + Number(c.weight ?? 1), 0) || 1;
+  const results = [];
+  for (let s = from; s <= to; s += step) {
+    let score = 0; const satisfied = [], violated = [], unsupported = [];
+    for (const c of constraints) {
+      const w = Number(c.weight ?? 1);
+      if (c.type === "system_not_paused") {
+        const raw = sysCache[c.system_id];
+        if (!raw) { unsupported.push({ type: c.type, reason: "unknown system: " + c.system_id }); continue; }
+        const sys = JSON.parse(raw);
+        const inPause = sys.rate && sys.rate.type === "paused" && (sys.rate.pauses || []).some((pz) => s >= Number(pz.from) && s < (pz.to == null ? Infinity : Number(pz.to)));
+        if (!inPause) { score += w; satisfied.push(c.type); } else violated.push(c.type);
+        continue;
+      }
+      const r = checkConstraint(c, s, requestUnixS);
+      if (r.unsupported) { unsupported.push({ type: c.type, reason: r.reason }); continue; }
+      if (r.ok) { score += w; satisfied.push(c.type); } else violated.push({ type: c.type, reason: r.reason });
+    }
+    results.push({ unix_s: s, score: score / totalWeight, satisfied, violated, unsupported });
+  }
+  results.sort((a, b) => b.score - a.score || a.unix_s - b.unix_s);
+  const best = results[0];
+  const alternatives = [];
+  for (const r of results.slice(1)) {
+    if (alternatives.length >= 3) break;
+    if (Math.abs(r.unix_s - best.unix_s) < 3600 || alternatives.some((a) => Math.abs(a.unix_s - r.unix_s) < 3600)) continue;
+    alternatives.push(r);
+  }
+  const toInst = (r) => ({ unix_s: r.unix_s, rfc3339: rfc3339(BigInt(r.unix_s) * NS_PER.s, "UTC"),
+    score: Math.round(r.score * 1000) / 1000, satisfied_constraints: r.satisfied, violated_constraints: r.violated,
+    unsupported_constraints: r.unsupported.length ? r.unsupported : undefined });
+  return ok({
+    best: toInst(best), alternatives: alternatives.map(toInst), samples_evaluated: results.length,
+    explanation: `Evaluated ${results.length} candidate instants at ${step}s resolution over [${from}, ${to}]; best satisfies ${Math.round(best.score * 100)}% of total constraint weight.`,
+    note: "Demonstration of CTCL-native constraint solving (§7), not a full meeting-scheduling SaaS. See GET /v1/planner/constraint-types for what's honestly supported.",
+  }, {}, "no-store");
+}
+
 // ---- endpoints -------------------------------------------------------------
 
 async function handleConvert(req) {
@@ -830,6 +934,10 @@ function toolDeclaration(origin) {
         input: { timezone: "IANA?", local_value: "naive local datetime string?", window_hours: "number? (default 48)" }, input_alt: { system_id: "string?", value: "string?", encoding: "string?" }, output: "status + safe + detail" },
       { name: "resolve-temporal-context", method: "POST", path: "/v1/resolve", desc: "resolve_temporal_context (§6): map an ambiguous input (city name, common alias, tz abbreviation) to IANA timezone candidates with confidence. NEVER silently picks one when genuinely ambiguous (e.g. \"CST\"). Free-form natural-language time phrases are explicitly out of scope — honest empty result, not a guess.",
         input: { input: "string (e.g. 'Taipei', '台北', 'CST', 'Asia/Tokyo')" }, output: "candidates[] (context_id, confidence, source) + scope_note" },
+      { name: "plan-shared-instant", method: "POST", path: "/v1/planner/shared-instant", desc: "plan_shared_instant (§7): I* = argmax_I U(I | constraints). A demonstration of CTCL-native constraint solving over a bounded search window, NOT a full meeting-scheduler SaaS. See GET /v1/planner/constraint-types for what's honestly supported (no external data feed = declared unimplemented, not faked).",
+        input: { window: { from: "unix_s", to: "unix_s", step_s: "number? (default 900, max 1000 samples)" }, constraints: [{ type: "weekday_hours|avoid_window|prefer_window|min_lead_time|system_not_paused|market_hours", weight: "number? (default 1)" }] },
+        output: "best + alternatives[] (unix_s, score, satisfied/violated/unsupported constraints) + explanation" },
+      { name: "constraint-types", method: "GET", path: "/v1/planner/constraint-types", desc: "Catalog of planner constraint types and which are actually implemented.", input: {}, output: "types + which are implemented" },
       { name: "validate", method: "POST", path: "/v1/validate", desc: "Validate a time value; returns warnings (POSIX-vs-UTC leap drift, out-of-range).", input: { value: "string", encoding: "unix_s|…", timescale: "utc|posix?" }, output: "valid + warnings + canonical_unix_ns" },
       { name: "transform-types", method: "GET", path: "/v1/transforms", desc: "Catalog of transform types (§12): identity, offset, linear_rate, piecewise, paused_clock (active-time), …", input: {}, output: "types + which are implemented" },
       { name: "version", method: "GET", path: "/v1/version", desc: "Versions, leap table, precision tiers (§35), trust tiers (§36), rate-limit policy (§38).", input: {}, output: "versions + tiers" },
@@ -866,6 +974,8 @@ function openapi(origin) {
       "/v1/temporal-groups/{id}/expand": { post: { summary: "One Instant, Many Systems: expand an instant across every group member", responses: { 200: { description: "ok" }, 404: { description: "unknown group/instant" } } } },
       "/v1/boundaries/inspect": { post: { summary: "Boundary Inspector (§5.6): proactive gap/fold/pause/rate_change status check", responses: { 200: { description: "ok" } } } },
       "/v1/resolve": { post: { summary: "resolve_temporal_context (§6): ambiguous input -> IANA candidates with confidence", responses: { 200: { description: "ok" } } } },
+      "/v1/planner/shared-instant": { post: { summary: "plan_shared_instant (§7): constraint-solve for a best shared instant", responses: { 200: { description: "ok" }, 400: { description: "window/constraints invalid" } } } },
+      "/v1/planner/constraint-types": { get: { summary: "Planner constraint-type catalog", responses: { 200: { description: "ok" } } } },
       "/v1/validate": { post: { summary: "Validate a time object (§41)", responses: { 200: { description: "ok" } } } },
       "/v1/transforms": { get: { summary: "Transform-type catalog (§12)", responses: { 200: { description: "ok" } } } },
       "/v1/transforms/{id}": { get: { summary: "A transform type's spec", responses: { 200: { description: "ok" }, 404: { description: "unknown" } } } },
@@ -978,6 +1088,10 @@ export function CTCL(base = '${origin}') {
     // ---- Semantic Resolution: ambiguous input -> IANA candidates (§6) -----------
     resolveContext: async (input) => D(await post('/v1/resolve', { input })),
 
+    // ---- Constraint Planner: I* = argmax_I U(I | constraints) (§7) --------------
+    planSharedInstant: async (window, constraints) => D(await post('/v1/planner/shared-instant', { window, constraints })),
+    constraintTypes:   async () => D(await j('/v1/planner/constraint-types')),
+
     // ---- §23 long-term memory: stamp an entry with verified instants ----------
     // Returns a record to STORE VERBATIM; separates event / write / recall time (§10.4).
     stampMemory: async (content, eventInstantId) => {
@@ -1064,6 +1178,8 @@ export default {
     }
     if (p === "/v1/boundaries/inspect" && request.method === "POST") return inspectBoundary(request, env);
     if (p === "/v1/resolve" && request.method === "POST") return handleResolve(request);
+    if (p === "/v1/planner/shared-instant" && request.method === "POST") return planSharedInstant(request, env);
+    if (p === "/v1/planner/constraint-types") return constraintTypesCatalog();
     if (p === "/i") return Response.redirect(origin + "/", 302);
     if (p.startsWith("/i/")) return instantSharePage(origin, decodeURIComponent(p.slice(3)), env);
     if (p === "/v1/path") return transformPath(url, env);
@@ -1283,6 +1399,7 @@ footer a{color:var(--dim)}
    <div class="ep"><span class="m">POST</span><span class="path">/v1/boundaries/inspect</span><span class="d" data-zh="主動檢查 DST gap／fold／暫停／速率變化，從不報錯">proactive gap／fold／pause／rate-change check, never errors</span></div>
    <div class="ep"><span class="m">GET</span><span class="path">/i/{id}</span><span class="d" data-zh="人類可讀的分享頁 —— 任何人都能對齊到同一瞬間">human-readable share page — anyone can align on the same instant</span></div>
    <div class="ep"><span class="m">POST</span><span class="path">/v1/resolve</span><span class="d" data-zh="模糊輸入 → IANA 候選＋信心值，從不武斷解析">ambiguous input → IANA candidates + confidence, never guesses</span></div>
+   <div class="ep"><span class="m">POST</span><span class="path">/v1/planner/shared-instant</span><span class="d" data-zh="給定限制，求解最佳共同瞬間">constraint-solve for the best shared instant given weighted constraints</span></div>
    <div class="ep"><span class="m">GET</span><span class="path">/ai/ctcl.json</span><span class="d" data-zh="agent 工具宣告 —— 先讀這個">agent tool declaration — read this first</span></div>
   </div>
  </section>
@@ -1341,6 +1458,15 @@ curl -s ${origin}/v1/instant/ctcl:instant:…</pre>
    <button class="btn pri" id="rgo" data-zh="解析 →">resolve →</button>
   </div>
   <pre id="rout">…</pre>
+ </section>
+
+ <section>
+  <div class="label" data-zh="限制求解規劃器">Constraint Planner</div>
+  <p data-zh="在未來 7 天內，求解一個滿足「台北工作時間、避開維護窗口、至少提前一小時」的最佳共同瞬間 —— 不是完整會議排程系統，是 CTCL 原生限制求解的展示。">Solve for the best shared instant in the next 7 days that satisfies "Taipei work hours, avoid a maintenance window, at least an hour of lead time" — not a full meeting-scheduler, a demonstration of CTCL-native constraint solving.</p>
+  <div class="pg">
+   <button class="btn pri" id="plgo" data-zh="規劃 →">plan →</button>
+  </div>
+  <pre id="plout">…</pre>
  </section>
 
  <footer>
@@ -1434,6 +1560,14 @@ $('bgo').addEventListener('click',tryInspect);
 async function tryResolve(){var body={input:$('rv').value};
  try{var r=await(await fetch(O+'/v1/resolve',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();$('rout').textContent=JSON.stringify(r.ok?r.data:r,null,2)}catch(e){$('rout').textContent=String(e)}}
 $('rgo').addEventListener('click',tryResolve);
+// constraint planner
+async function tryPlan(){var now=Math.floor(Date.now()/1000);
+ var body={window:{from:now,to:now+7*86400,step_s:1800},
+  constraints:[{type:'weekday_hours',timezone:'Asia/Taipei',days:[1,2,3,4,5],start:'09:00',end:'18:00',weight:2},
+               {type:'avoid_window',from:now+86400,to:now+86400+7200,weight:1},
+               {type:'min_lead_time',seconds:3600,weight:1}]};
+ try{var r=await(await fetch(O+'/v1/planner/shared-instant',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();$('plout').textContent=JSON.stringify(r.ok?r.data:r,null,2)}catch(e){$('plout').textContent=String(e)}}
+$('plgo').addEventListener('click',tryPlan);
 // share this instant — navigate (not window.open: popup blockers reject open() after an await)
 $('shareBtn').addEventListener('click',async function(){try{
  var r=await(await fetch(O+'/v1/instants',{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).json();
