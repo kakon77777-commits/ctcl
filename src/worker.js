@@ -197,7 +197,8 @@ async function createSystem(req, env) {
   if (rtype === "constant" && !Number.isFinite(rate.value)) return fail("UNSUPPORTED_POLICY", "rate.value must be a finite number");
   if (rtype === "piecewise") { if (!Array.isArray(rin.segments)) return fail("UNSUPPORTED_POLICY", "piecewise needs rate.segments: [{until: unix_s|null, rate: number}]"); rate.segments = rin.segments; }
   else if (rtype === "paused") { if (!Array.isArray(rin.pauses)) return fail("UNSUPPORTED_POLICY", "paused needs rate.pauses: [{from: unix_s, to: unix_s|null}]"); rate.pauses = rin.pauses; }
-  else if (rtype !== "constant") return fail("UNSUPPORTED_POLICY", "rate.type must be constant | piecewise | paused");
+  else if (rtype === "table") { if (!Array.isArray(rin.table)) return fail("UNSUPPORTED_POLICY", "table needs rate.table: [{parent: unix_s, local: seconds}]"); rate.table = rin.table; }
+  else if (rtype !== "constant") return fail("UNSUPPORTED_POLICY", "rate.type must be constant | piecewise | paused | table");
   const rec = {
     id: sys.id, parent: sys.parent || "ctcl:system:unix",
     epoch: sys.epoch || { parent_value: "0", encoding: "unix_s" },
@@ -245,6 +246,21 @@ function localSeconds(sys, parentSec, epochSec) {
     }
     if (cursor < parentSec && segs.length) local += Number(segs[segs.length - 1].rate) * (parentSec - cursor);
     return { local: local + off, extra: { wall_elapsed_s: elapsed, segments: segs.length } };
+  }
+  if (rate.type === "table") {
+    const tbl = (rate.table || []).map((p) => ({ p: Number(p.parent), l: Number(p.local) })).sort((a, b) => a.p - b.p);
+    if (!tbl.length) return { local: off, extra: { table: 0 } };
+    if (parentSec <= tbl[0].p) return { local: tbl[0].l + off, extra: { table: tbl.length, clamp: "start" } };
+    const last = tbl[tbl.length - 1];
+    if (parentSec >= last.p) return { local: last.l + off, extra: { table: tbl.length, clamp: "end" } };
+    for (let i = 0; i < tbl.length - 1; i++) {
+      const a = tbl[i], b = tbl[i + 1];
+      if (parentSec >= a.p && parentSec <= b.p) {
+        const f = (b.p === a.p) ? 0 : (parentSec - a.p) / (b.p - a.p);
+        return { local: a.l + f * (b.l - a.l) + off, extra: { table: tbl.length, interpolated: true } };
+      }
+    }
+    return { local: off, extra: { table: tbl.length } };
   }
   return { local: Number(rate.value ?? 1) * elapsed + off, extra: { wall_elapsed_s: elapsed } };
 }
@@ -311,7 +327,7 @@ const TRANSFORM_TYPES = {
   linear_rate: { formula: "y = a·(x − epoch) + b", params: ["rate", "epoch", "offset"], invertible: "exact (a≠0)", implemented: true, via: "/v1/transform, /v1/systems" },
   piecewise_linear: { formula: "y = aᵢ·x + bᵢ on interval i", params: ["segments"], invertible: "partial", implemented: true, via: "/v1/systems (rate.type=piecewise)" },
   paused_clock: { formula: "τ(t) = ∫ r(t) dt, r=0 while paused", params: ["pauses"], invertible: "none (pauses erase ordering)", implemented: true, note: "active-time (§25)", via: "/v1/systems (rate.type=paused)" },
-  table_lookup: { formula: "y = table(x)", invertible: "partial", implemented: false },
+  table_lookup: { formula: "y = piecewise-linear interpolation of a (parent, local) table", params: ["table"], invertible: "partial", implemented: true, via: "/v1/systems (rate.type=table)" },
   timezone: { formula: "local civil time via IANA tz", invertible: "partial (DST ambiguity)", implemented: true, via: "/v1/convert" },
   calendar: { formula: "world date via day_seconds / year_days", invertible: "exact", implemented: true, via: "/v1/systems/{id}/now" },
   custom_expression: { formula: "user-supplied expression", invertible: "unknown", implemented: false },
