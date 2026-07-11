@@ -1251,6 +1251,1065 @@ export default CTCL;
 `;
 }
 
+// ---- AICL layer (AI Ingestion & Capability Layer) + AIRS/AILP rights spectrum ------
+// Following the pattern Neo.K established for EML and PHOSPHOR: four sublayers —
+// Manifest / Corpus / Capability / Governance-Rights — served as static markdown/JSON,
+// no build step, consistent with this Worker's own architecture. See /ai/index.md for
+// the full explanation. IMPORTANT: none of this content uses backtick code-spans or
+// triple-backtick fences, because it all lives inside JS template literals — see the
+// note in AI_INDEX_MD's own "how this file is generated" aside... actually there is no
+// such aside, this comment IS the note: don't add literal backticks to these strings.
+
+const LLMS_TXT = `# CTCL — Common Temporal Coordinate Layer
+
+> A verified reference instant + heterogeneous time transformation layer for agents,
+> simulators, digital twins, and persistent AI. Not a world clock. τ_i = Φ_i(I*).
+
+CTCL answers a different question than a normal time API: not "what time is it" but
+"which verified reference instant, transformed through which explicit rule, into which
+local system." Read /ai/index.md first for the full machine-reading order.
+
+## Core
+
+- [Agent tool declaration](/ai/ctcl.json): the whole API in one file, read this first
+- [Manifest](/ai/manifest.json): project structure and reading order
+- [OpenAPI](/openapi.json): REST paths
+- [JS SDK](/sdk.js): ESM client
+
+## Corpus
+
+- [Origin](/ai/corpus/origin.md): why CTCL exists
+- [Current state](/ai/corpus/current.md): what ships today
+- [Design history](/ai/corpus/design-history.md): how it got here
+- [Concept genealogy](/ai/corpus/concept-genealogy.md): what's frozen vs. experimental
+- [Public summary](/ai/corpus/public-summary.md): a short citable description
+
+## Specs and examples
+
+- [CTCL v1 spec](/ai/specs/ctcl-v1.md): normative API digest
+- [Worked examples](/ai/sitemap.json): see ai_files for all seven example walkthroughs
+- [Tool catalog](/ai/tools/catalog.json) and [tools guide](/ai/tools/tools.md)
+
+## Governance and rights
+
+- [Rights spectrum](/ai/rights-spectrum.json): how AI may use this content
+- [License status](/ai/governance/license.md): currently undecided — see the file
+- [Usage policy](/ai/governance/usage-policy.md)
+
+## Also useful
+
+- [Status](/status): live component health
+- [Developers](/developers): error codes, changelog, version policy
+`;
+
+const AI_INDEX_MD = `# CTCL — /ai/ entry point
+
+This directory is CTCL's AICL surface (AI Ingestion & Capability Layer) — a structured,
+machine-first companion to the human site at commoninstant.org. It exists so an AI
+agent can understand CTCL correctly on the first read, without re-deriving intent from
+prose scattered across a marketing page.
+
+CTCL's own thesis is the same idea turned into infrastructure: an interoperable time
+layer shouldn't just return "now" — it should return a verified reference instant plus
+enough context (source, uncertainty, transform) that a reader or agent doesn't have to
+guess. This /ai/ layer applies that same discipline to understanding CTCL itself.
+
+## Read in this order
+
+1. Manifest — this file plus manifest.json, version.json, sitemap.json — what CTCL is,
+   what's canonical, where everything lives.
+2. Corpus (corpus/) — origin, current state, design history, concept genealogy,
+   engineering invariants. Read corpus/current.md before trusting any external summary
+   of "what CTCL can do today" — that file is updated alongside the code, summaries
+   elsewhere are not.
+3. Capability (specs/, examples/, tools/, plus the live /ai/ctcl.json tool declaration
+   and /openapi.json) — the actual callable surface, with schemas and worked examples.
+4. Governance (governance/, rights-spectrum.json) — license status, how AI may use this
+   content, provenance, versioning precedence.
+
+## Two repositories, do not confuse
+
+This repository (github.com/kakon77777-commits/ctcl) is CTCL itself: the Worker, the
+API, this /ai/ layer, and the two founding whitepapers plus two product whitepapers in
+docs/. CTCL was not built from scratch here — it was migrated out of Neo.K's
+unbounded-axiom (Logic Matrix) repository on 2026-07-11 once it grew past being a
+sub-project. If you find references to a ctcl/worker.js file inside unbounded-axiom,
+that is stale history, not the canonical source — see corpus/deprecated-concepts.md.
+
+## What CTCL is not
+
+- Not a world clock, meeting planner, or civil-time content site — see
+  corpus/origin.md, section "why not a world clock."
+- Not a timing authority or NTP replacement — read /v1/version and /status for honest
+  precision and trust-tier claims before depending on it for anything time-critical.
+- Not (yet) the separate CTCL Temporal Port desktop App described in
+  docs/CTCL_Temporal_Port_App_通用時間端口技術白皮書_v0.1.md — that is a different,
+  not-yet-started product on a different stack (Rust/Tauri vs. this Cloudflare Worker).
+
+## Agent guidance
+
+- Prefer /ai/ctcl.json over guessing at endpoints — it is generated from the same
+  source as the router, so it cannot drift from the real behavior.
+- Do not assume TAI/GPS timescales are leap-second-accurate — they are a flat
+  approximation; /v1/version says so explicitly.
+- Do not silently resolve ambiguous timezone or place input — use /v1/resolve and check
+  the candidate count before picking one, matching CTCL's own discipline (whitepaper
+  section 6.3).
+- If summarizing CTCL's capabilities for a third party, prefer corpus/public-summary.md
+  over re-deriving a summary from the whitepapers — it is the intentionally-citable one.
+- Check governance/license.md before assuming any reuse rights — none have been granted
+  as of this writing.
+`;
+
+function aiManifest(origin) {
+  return {
+    "$schema": "aicl-manifest/0.1",
+    project: {
+      name: "CTCL", full_name: "Common Temporal Coordinate Layer",
+      tagline: "A verified reference instant + heterogeneous time transformation layer for agents. Same instant, different representations.",
+      homepage: "https://commoninstant.org", repository: "https://github.com/kakon77777-commits/ctcl",
+      author: "Neo.K / 一言諾科技有限公司 (EveMissLab)",
+      layers: ["Manifest", "Corpus", "Capability", "Governance/Rights"],
+    },
+    reading_order: ["ai/index.md", "ai/manifest.json", "ai/corpus/origin.md", "ai/corpus/current.md", "ai/specs/ctcl-v1.md", "ai/ctcl.json", "ai/rights-spectrum.json"],
+    corpus: [
+      { path: "ai/corpus/origin.md", role: "why CTCL exists, its driving thesis", format: "markdown" },
+      { path: "ai/corpus/current.md", role: "what ships today, kept in sync with the live Worker", format: "markdown" },
+      { path: "ai/corpus/design-history.md", role: "stage-by-stage build history", format: "markdown" },
+      { path: "ai/corpus/concept-genealogy.md", role: "which concepts are frozen vs. experimental", format: "markdown" },
+      { path: "ai/corpus/engineering-notes.md", role: "hard invariants an agent must not violate", format: "markdown" },
+      { path: "ai/corpus/accepted-concepts.md", role: "concepts that reached stable/implemented status", format: "markdown" },
+      { path: "ai/corpus/deprecated-concepts.md", role: "superseded names and locations", format: "markdown" },
+      { path: "ai/corpus/public-summary.md", role: "short citable summary", format: "markdown" },
+      { path: "ai/corpus/full-corpus.jsonl", role: "one JSON knowledge-unit per line, for batch ingestion", format: "jsonl" },
+    ],
+    specs: [
+      { path: "ai/specs/ctcl-v1.md", role: "normative API digest (MUST/SHOULD language, error codes, schemas)", format: "markdown" },
+      { path: "ai/specs/instant-schema.json", role: "JSON Schema for the instant envelope", format: "json-schema" },
+      { path: "ai/specs/error-schema.json", role: "JSON Schema for the {ok:false,error} envelope", format: "json-schema" },
+      { path: "ai/specs/system-schema.json", role: "JSON Schema for a custom temporal system definition", format: "json-schema" },
+      { path: "ai/specs/group-schema.json", role: "JSON Schema for a Temporal Group definition", format: "json-schema" },
+    ],
+    examples: [
+      "ai/examples/000-verified-instant.md", "ai/examples/001-multi-agent-alignment.md", "ai/examples/002-precision-preserving-convert.md",
+      "ai/examples/003-custom-world-clock.md", "ai/examples/004-one-instant-many-systems.md", "ai/examples/005-boundary-inspection.md",
+      "ai/examples/006-constraint-planning.md",
+    ].map((path) => ({ path })),
+    tools: { catalog: "ai/tools/catalog.json", guide: "ai/tools/tools.md", live_tool_declaration: "ai/ctcl.json", openapi: "openapi.json", sdk: "sdk.js" },
+    rights: { spectrum: "ai/rights-spectrum.json" },
+    governance: ["ai/governance/license.md", "ai/governance/usage-policy.md", "ai/governance/provenance.md", "ai/governance/citation-policy.md", "ai/governance/crawler-policy.md", "ai/governance/versioning-policy.md"],
+    papers: [
+      { path: "docs/共同時間座標層與異質時空間轉換_v0.1.md", role: "theory whitepaper" },
+      { path: "docs/CTCL_Agent_Time_API_技術白皮書_v0.1.md", role: "API/protocol whitepaper, 57 sections" },
+      { path: "docs/CTCL_CommonInstant_Web_網站協議入口技術白皮書_v0.1.md", role: "this website's own product whitepaper" },
+      { path: "docs/CTCL_Temporal_Port_App_通用時間端口技術白皮書_v0.1.md", role: "separate, not-yet-started desktop app whitepaper" },
+    ],
+    versions: { manifest: "0.1", api: API_VERSION, release: "0.1", aicl_layer: "0.1" },
+    agent_guidance: [
+      "Do not ask only 'what time is it' — ask which reference instant, which timescale, from which source, transformed into which local system.",
+      "Prefer /ai/ctcl.json for capability discovery; it is machine-generated from the same source as the router.",
+      "Never silently resolve ambiguous timezone/place input — use /v1/resolve and check candidate count.",
+      "Never claim ns/us accuracy from this deployment — the edge wall clock is millisecond-grade; /v1/version says so.",
+      "For long-term agent memory, store an instant_id (via /v1/instants), not a bare timestamp number.",
+      "Treat the CTCL Temporal Port App whitepaper as a separate, unimplemented product — do not assume its features exist.",
+    ],
+    base_url: origin,
+  };
+}
+
+const AI_VERSION_JSON = {
+  manifest_version: "0.1", aicl_layer_version: "0.1", api_version: API_VERSION, release: "0.1",
+  spec_version: "ctcl-v1", rights_spectrum_version: "0.1",
+  last_major_milestone: "CommonInstant Web whitepaper P0-P6 complete + Status/Developer Console pages + this AICL layer",
+  last_updated: "2026-07-11",
+};
+
+const AI_SITEMAP_JSON = {
+  ai_files: [
+    "ai/index.md", "ai/manifest.json", "ai/version.json", "ai/sitemap.json", "ai/rights-spectrum.json",
+    "ai/corpus/origin.md", "ai/corpus/current.md", "ai/corpus/design-history.md", "ai/corpus/concept-genealogy.md",
+    "ai/corpus/engineering-notes.md", "ai/corpus/accepted-concepts.md", "ai/corpus/deprecated-concepts.md",
+    "ai/corpus/public-summary.md", "ai/corpus/full-corpus.jsonl",
+    "ai/specs/ctcl-v1.md", "ai/specs/instant-schema.json", "ai/specs/error-schema.json", "ai/specs/system-schema.json", "ai/specs/group-schema.json",
+    "ai/examples/000-verified-instant.md", "ai/examples/001-multi-agent-alignment.md", "ai/examples/002-precision-preserving-convert.md",
+    "ai/examples/003-custom-world-clock.md", "ai/examples/004-one-instant-many-systems.md", "ai/examples/005-boundary-inspection.md", "ai/examples/006-constraint-planning.md",
+    "ai/tools/catalog.json", "ai/tools/tools.md",
+    "ai/governance/license.md", "ai/governance/usage-policy.md", "ai/governance/provenance.md", "ai/governance/citation-policy.md", "ai/governance/crawler-policy.md", "ai/governance/versioning-policy.md",
+    "ai/ctcl.json",
+  ],
+  related: ["/llms.txt", "/openapi.json", "/sdk.js", "/status", "/developers",
+    "docs/共同時間座標層與異質時空間轉換_v0.1.md", "docs/CTCL_Agent_Time_API_技術白皮書_v0.1.md",
+    "docs/CTCL_CommonInstant_Web_網站協議入口技術白皮書_v0.1.md", "docs/CTCL_Temporal_Port_App_通用時間端口技術白皮書_v0.1.md"],
+};
+
+const CORPUS_ORIGIN_MD = `# Origin
+
+CTCL — 共同時間座標層 / Common Temporal Coordinate Layer — began from a concrete,
+personal problem, not an abstract one: Neo.K needed AIs to reliably remember a verified
+time-point (memory and life-history alignment across sessions).
+
+The honest reality behind that need: an AI agent can read a system clock, but only by
+actively running a command — it has no ambient sense of time between turns, its
+memory or session timestamps are hand-stamped and unverified, and across sessions it is
+a new instance reading old notes, not a continuous observer. Looking at a clock is not
+the same thing as having completely remembered that time-point. CTCL's core formula
+names the gap directly:
+
+    τ_i = Φ_i(I*)
+
+Every system i has its own local time τ_i, produced by applying its own transform Φ_i
+to a shared reference instant I*. Two agents (or one agent across two sessions) don't
+need to share a clock, calendar, or epoch — they need to point at the same I*, and then
+anyone can independently derive their own faithful local representation of it.
+
+## Why not a world clock
+
+The theory whitepaper opens by explicitly rejecting the obvious mis-reading: CTCL is not
+a more complicated version of a world-clock site. A world clock answers "what time is
+it in Tokyo." CTCL answers a structurally different question: given one shared event,
+how is it represented across a Taipei civil calendar, an agent's active-time clock, a
+simulation's accelerated calendar, and a game's custom epoch — and what rule, version,
+and source backs each of those representations?
+
+Mature civil-time products (world clocks, meeting planners, sunrise/sunset data)
+already exist and are good at their job. CTCL doesn't compete with them and explicitly
+routes civil-time questions elsewhere (see governance/usage-policy.md and the site's own
+/developers page). CTCL's job is the part those products don't do: verified reference
+instants, explicit heterogeneous transforms, and multi-agent alignment.
+
+## The two founding whitepapers
+
+- 共同時間座標層與異質時空間轉換_v0.1.md — the theory: I*, timescales, transform
+  graphs, non-lossless assumptions, the wall/active/memory-time distinction.
+- CTCL_Agent_Time_API_技術白皮書_v0.1.md — the 57-section API/protocol spec this
+  Worker was originally built against.
+
+Two later product whitepapers (CTCL_CommonInstant_Web... and CTCL_Temporal_Port_App...)
+extended the scope into, respectively, this website's own product design and a separate
+(not-yet-built) desktop application — see design-history.md for when each arrived and
+what changed as a result.
+`;
+
+const CORPUS_CURRENT_MD = `# Current state
+
+Kept in sync with the live Worker. If this disagrees with the running deployment, the
+deployment is right — file a correction.
+
+CTCL v0.1 ships as a single self-contained Cloudflare Worker (src/worker.js, no build
+step) at https://commoninstant.org. There is one JSON API (/v1/*), one JS SDK (/sdk.js,
+ESM), one inline human page (/), a Status/Trust panel (/status), a Developer Console
+(/developers), a per-instant share page (/i/{id}), and this /ai/ AICL layer. State
+(instants, custom systems, Temporal Groups) lives in the CTCL_KV Workers KV namespace;
+every stateful endpoint degrades gracefully (503 REGISTRY_UNAVAILABLE) if that binding
+is ever missing.
+
+## Endpoint groups
+
+- Reference instant: GET /v1/now (verified instant, source, uncertainty, optional
+  Ed25519 signature), GET /v1/timescales, GET /v1/encodings, GET /v1/version (includes a
+  live runtime health block).
+- Conversion: POST /v1/convert (BigInt-nanosecond precision-preserving, cross
+  encoding/timescale/timezone, DST-ambiguity-aware), POST /v1/transform (map into a
+  one-off custom linear-rate system).
+- Multi-agent alignment: POST /v1/instants plus GET /v1/instant/{id} plus the human
+  GET /i/{id} Share Instant page — register once, any agent or a later session
+  retrieves the exact same instant.
+- Custom temporal systems: POST and GET /v1/systems, GET /v1/systems/{id}/now —
+  persistent world clocks with rate.type = constant, piecewise, paused (active-time,
+  whitepaper section 25), or table.
+- Temporal Groups: POST and GET /v1/temporal-groups, POST /v1/temporal-groups/{id}/expand
+  — "One Instant, Many Systems," CTCL's flagship differentiator: project one instant
+  across every member of a named, versioned group in a single call.
+- Boundary Inspector: POST /v1/boundaries/inspect — proactive gap/fold/pause/rate_change
+  status check that never errors (unlike /v1/convert).
+- Semantic Resolution: POST /v1/resolve — ambiguous place/alias/abbreviation input to
+  IANA candidates with confidence; never silently disambiguates.
+- Constraint Planner: POST /v1/planner/shared-instant — a bounded (max 1000 samples)
+  constraint solver over a search window; explicitly not a full meeting-scheduler SaaS.
+- Graph and validation: GET /v1/path, POST /v1/validate, GET /v1/transforms(/{id}).
+- Discovery: GET /openapi.json, GET /ai/ctcl.json, GET /llms.txt, this /ai/ tree.
+
+## What is honestly NOT implemented
+
+See engineering-notes.md for the reasoning behind each of these, and /status for a
+live-rendered version of the same list:
+
+- custom_expression transform (arbitrary-expression eval — a deliberate security
+  decision, not a gap to fill)
+- Full leap-aware TAI/GPS conversion (currently a flat +37s/+18s approximation)
+- Hard per-key rate limiting (today's limiter is Cloudflare's native, per-colo
+  approximate mechanism; a hard guarantee needs a Durable Object)
+- Signing beyond /v1/now (registered instants are not yet signed)
+- Offline mode, monotonic/rollback checks
+- gpu_availability and simulation_state planner constraints (no external data feed)
+- A live MCP server, a CLI, a webhook relay
+
+## Tech stack
+
+Cloudflare Workers (plain JS, no framework), Workers KV (CTCL_KV), the Workers native
+rate limiter (API_RL), Ed25519 via WebCrypto for /v1/now signing, IANA tzdb via the
+runtime Intl object (no vendored tzdb). No build tool, no bundler, no external runtime
+dependency beyond wrangler for deploy tooling.
+`;
+
+const CORPUS_DESIGN_HISTORY_MD = `# Design history
+
+All dates below are from git history and session notes; this project moved fast — most
+of it happened across two days.
+
+## 2026-07-10 — MVP
+
+Shipped inside Neo.K's unbounded-axiom (Logic Matrix) repository as a sub-project
+(ctcl/worker.js), then deployed as its own separate Cloudflare Worker at
+ctcl.neokpolaris.workers.dev. The domain commoninstant.org was bought the same day,
+chosen over an earlier candidate (worldwidetime.org) specifically because that name
+clashed with the theory whitepaper's own opening disclaimer that CTCL is not a world
+clock — a name needing a disclaimer against itself was judged a liability.
+
+## 2026-07-11 — Phase 2: persistence
+
+A KV-backed instant registry (register once, any agent retrieves the exact same
+instant — multi-agent alignment, verified end to end) plus persistent custom temporal
+systems. Also a full page redesign: Fraunces plus JetBrains Mono typography, warm-ink
+gold light and dark themes, English-primary/Chinese-secondary i18n, and an experimental
+opt-in "Spacetime" theme.
+
+## 2026-07-11 — whitepaper-completion push
+
+A focused push closed the original Agent Time API whitepaper's endpoint map (13 of 13),
+added piecewise and paused rate types (active-time for agent life-history), hardened
+DST ambiguity handling in convert, and shipped the client SDK including the memory and
+life-history helpers that directly answer the project's original driver ("how does an
+AI completely remember a time-point").
+
+## 2026-07-11 — signing, rate limiting, migration
+
+Ed25519 signing for /v1/now, native rate limiting (120 requests per minute per IP on
+/v1/*), the table_lookup transform type, and — separately — migration of the entire
+project out of unbounded-axiom into its own standalone repository
+(github.com/kakon77777-commits/ctcl), once it had clearly grown past being a
+sub-project of the Logic Matrix corpus.
+
+## 2026-07-11 — CTCL becomes the key project; two new whitepapers
+
+Two additional whitepapers arrived: one defining this website's own product scope
+(CommonInstant Web — public protocol gateway, reference surface, developer
+playground), and one defining a separate, much larger, not-yet-started product (the
+CTCL Temporal Port desktop App — a different technology stack entirely, Rust and
+Tauri rather than a Cloudflare Worker). Neo.K chose to finish and extend the website
+first, and to treat the desktop app as later, separate work.
+
+## 2026-07-11 — CommonInstant Web priorities P1 through P6, same day
+
+Temporal Groups ("One Instant, Many Systems"), the Boundary Inspector, the Share
+Instant human page, Semantic Resolution, and the Constraint Planner — all six
+priorities from the CommonInstant Web whitepaper's own roadmap, shipped, deployed, and
+individually verified on the same day. Two real bugs were found and fixed through
+actual testing during this push, not just code review: a stored and reflected XSS risk
+on the Share Instant page (user-supplied content wasn't being escaped before
+rendering), and a popup-blocker issue on the homepage's "share this instant" button
+(window.open after an awaited fetch is unreliable across browsers; switched to a plain
+navigation).
+
+## 2026-07-11 — Status, Developer Console, and this AICL layer
+
+A Status and Trust Panel page (live component health plus an honest known-limitations
+list) and a Developer Console page (interfaces, error codes, version policy,
+changelog) closed out the CommonInstant Web whitepaper's remaining site structure.
+This /ai/ corpus and rights-spectrum declaration were added the same day, following the
+same AICL and AIRS/AILP pattern already used for the EML and PHOSPHOR projects.
+`;
+
+const CORPUS_CONCEPT_GENEALOGY_MD = `# Concept genealogy
+
+Status tags below follow the same discipline as the whitepapers: frozen concepts don't
+change without a version bump; stable concepts are implemented and trusted; prototype
+concepts work today but are known to be a simplified first version; explicitly-rejected
+concepts are not "coming soon" — they were considered and declined.
+
+## Frozen
+
+- The reference instant I* and the transform formula τ_i = Φ_i(I*). These are the
+  whole thesis; changing them would mean CTCL is a different project.
+- The response envelope shape: {ok, data, meta} for success, {ok:false, error, meta}
+  for failure. New optional fields may be added; the shape itself will not change
+  within API version v1.
+
+## Stable (implemented, trusted)
+
+- Timescales: utc, posix, tai (approximate), gps (approximate).
+- Encodings: unix_s, unix_ms, unix_us, unix_ns, rfc3339.
+- The instant envelope schema (see specs/instant-schema.json).
+- Custom temporal systems with rate.type constant, piecewise, paused, or table.
+- Temporal Groups and the group-expand operation.
+- The Boundary Inspector's status enum: normal, gap, fold, pause, rate_change.
+- Ed25519 signing of /v1/now (note: scope is that one endpoint only — see
+  engineering-notes.md).
+
+## Stable but deliberately narrow scope
+
+- Semantic Resolution (resolve_temporal_context): place-name and timezone-abbreviation
+  resolution only. Free-form natural-language time phrases are out of scope by design,
+  not by oversight — see engineering-notes.md.
+- The Constraint Planner (plan_shared_instant): a bounded demonstration of
+  constraint-based instant solving, explicitly not a full meeting-scheduler product.
+
+## Prototype
+
+- The transform graph (GET /v1/path) is currently a star graph — every custom system
+  routes through ctcl:system:unix, with unix/utc/posix as identity peers. A real
+  multi-hop graph with per-edge uncertainty and trust scoring has not been built yet.
+- Trust tiers T0 through T4 are documented in /v1/version, but only T2
+  (network-synchronized) is actually reachable today — there is no T3/T4 authenticated
+  source chain yet.
+
+## Explicitly rejected, not merely unbuilt
+
+- The custom_expression transform type: arbitrary user-supplied expression evaluation
+  was considered and declined as a security risk. It will not appear in a future
+  version unless sandboxing changes the risk calculus.
+`;
+
+const CORPUS_ENGINEERING_NOTES_MD = `# Engineering notes — hard invariants
+
+These are constraints an agent modifying or extending CTCL must not violate, and a
+reader should assume are true of every response it gets from the live API.
+
+## Precision is not accuracy
+
+The edge wall clock backing this deployment is millisecond-grade. The ns and us fields
+in every instant envelope are zero-padded for format compatibility, never a claim of
+real nanosecond-level synchronization. quality.precision and
+quality.estimated_uncertainty_ns say this honestly in every /v1/now response; do not
+override that framing when summarizing CTCL to a third party.
+
+## BigInt nanosecond math for lossless conversion
+
+Canonical time values are carried as BigInt nanoseconds internally. Conversions never
+round through a float64 Number for the canonical value — that would silently lose
+precision the caller may have supplied. The quality.lossless flag on /v1/convert
+responses reflects whether the chosen OUTPUT encoding, specifically, can represent that
+value without truncation; it is not a claim about measurement accuracy.
+
+## Graceful degradation, never an unhandled error
+
+Every endpoint backed by the CTCL_KV namespace returns a structured
+503 REGISTRY_UNAVAILABLE if that binding is missing on a given deployment, rather than
+throwing. Stateless endpoints (now, convert, transform, validate) keep working even if
+KV is entirely unbound.
+
+## No arbitrary code evaluation
+
+The custom_expression transform type is intentionally absent. Evaluating an
+arbitrary user-supplied expression inside the Worker would be a real security
+liability; this is a permanent design decision, not a backlog item.
+
+## Ambiguity is surfaced, never silently resolved
+
+Three separate places in the API embody the same discipline: /v1/convert returns
+NONEXISTENT_LOCAL_TIME or AMBIGUOUS_LOCAL_TIME rather than guessing a DST-affected
+local time; the Boundary Inspector reports a status (gap, fold, pause, rate_change)
+instead of picking an answer; and Semantic Resolution returns multiple candidates with
+confidence scores rather than silently choosing one when an input like "CST" is
+genuinely ambiguous between US Central and China Standard time.
+
+## Per-item error isolation
+
+Both the Temporal Groups expand operation and the Constraint Planner isolate failures
+per item: one unknown system id inside a group, or one unsupported constraint type in a
+plan request, produces a per-item error field rather than failing the entire request.
+
+## User content is always escaped before rendering
+
+Learned concretely during the Share Instant page's build: the user-supplied label
+field on a registered instant, and the raw id segment of an /i/{id} URL, are both
+attacker-influenceable and are rendered into an HTML page. Both now pass through
+HTML-escaping before interpolation; this was verified against a literal script-tag
+payload before that feature was deployed, not assumed safe by inspection alone.
+
+## Don't open a new tab after an awaited fetch
+
+A homepage "share this instant" button originally called window.open after an async
+fetch resolved; several browsers' popup blockers reject window.open once it's outside
+the synchronous tick of the original user gesture. The fix was a plain page navigation
+instead — a small but real cross-browser lesson, not a stylistic preference.
+`;
+
+const CORPUS_ACCEPTED_CONCEPTS_MD = `# Accepted concepts
+
+| Concept | Status | Since |
+|---|---|---|
+| Reference instant I* (envelope) | frozen | 2026-07-10 |
+| Transform formula: tau_i = Phi_i(I*) | frozen | 2026-07-10 |
+| BigInt-nanosecond precision-preserving convert | stable | 2026-07-10 |
+| Multi-agent instant registry (register/retrieve) | stable | 2026-07-11 |
+| Custom temporal systems (constant/piecewise/paused/table) | stable | 2026-07-11 |
+| Temporal Groups ("One Instant, Many Systems") | stable | 2026-07-11 |
+| Boundary Inspector (gap/fold/pause/rate_change) | stable | 2026-07-11 |
+| Ed25519 instant signing (/v1/now only) | stable, partial scope | 2026-07-11 |
+| Semantic Resolution (place/alias to IANA) | stable, narrow scope | 2026-07-11 |
+| Constraint Planner (bounded window solver) | stable, narrow scope | 2026-07-11 |
+| Status/Trust Panel and Developer Console | stable | 2026-07-11 |
+| AICL/AIRS /ai/ layer | stable (this layer) | 2026-07-11 |
+`;
+
+const CORPUS_DEPRECATED_CONCEPTS_MD = `# Deprecated / superseded
+
+- ctcl/worker.js and wrangler-ctcl.jsonc inside the unbounded-axiom repository —
+  superseded. CTCL now lives at its own standalone repository
+  (github.com/kakon77777-commits/ctcl). If an agent finds CTCL source inside
+  unbounded-axiom, that is stale pre-migration history, not the canonical source.
+- A stale master branch lingers on this repository's GitHub remote from initial repo
+  creation. main is the only branch that receives updates.
+- custom_expression transform — not deprecated in the usual sense (it never existed),
+  but readers of the transform-type catalog sometimes assume it is "coming soon." It is
+  intentionally, permanently absent for security reasons — see engineering-notes.md.
+- Nothing else has been formally deprecated yet; the project is one day old relative to
+  this file's writing.
+`;
+
+const CORPUS_PUBLIC_SUMMARY_MD = `# CTCL — public summary
+
+CTCL (Common Temporal Coordinate Layer) is a verified-reference-instant and
+heterogeneous-time-transformation API for AI agents, simulators, digital twins, and
+persistent AI systems, built by Neo.K and EveMissLab, live at commoninstant.org. Its
+core idea: rather than each system asking "what time is it" independently, all systems
+align on one shared reference instant (I*) and derive their own local time through an
+explicit, versioned transform (tau_i = Phi_i(I*)) — so heterogeneous agents can
+coordinate without sharing a clock, calendar, or epoch. Distinguishing features:
+multi-agent instant registration and retrieval, persistent custom time systems
+(including paused "active-time" clocks for agent life-history), Temporal Groups for
+one-call multi-system projection, a proactive DST and boundary inspector, scoped
+semantic timezone resolution, and a bounded constraint-based instant planner. It
+explicitly is not a world clock, not a timing authority, and not yet an installable
+desktop application.
+`;
+
+function corpusFullJsonl() {
+  const units = [
+    { type: "project", id: "ctcl", name: "CTCL", full_name: "Common Temporal Coordinate Layer", summary: "Verified reference instant + heterogeneous time transformation layer for agents.", homepage: "https://commoninstant.org" },
+    { type: "definition", id: "reference_instant", symbol: "I*", summary: "A common reference instant multiple heterogeneous systems can point at." },
+    { type: "definition", id: "transform_formula", symbol: "tau_i = Phi_i(I*)", summary: "System i's local time is its own transform Phi_i applied to the shared reference instant I*." },
+    { type: "layer", id: "manifest", summary: "Machine entry point: what to read first and in what order." },
+    { type: "layer", id: "corpus", summary: "Canonical project knowledge: origin, current state, history, concept status." },
+    { type: "layer", id: "capability", summary: "Bounded, schema-declared tool calling: specs, examples, tool catalog." },
+    { type: "layer", id: "governance", summary: "License, provenance, citation, crawler and versioning policy, rights spectrum." },
+    { type: "invariant", id: "precision_not_accuracy", summary: "The edge wall clock is millisecond-grade; ns/us fields are format-padding, never claimed as real sync accuracy." },
+    { type: "invariant", id: "bigint_ns_math", summary: "Canonical time values use BigInt nanoseconds; never round through float64 for lossless conversion." },
+    { type: "invariant", id: "graceful_kv_degradation", summary: "Any KV-backed endpoint returns 503 REGISTRY_UNAVAILABLE if CTCL_KV is unbound, never an unhandled error." },
+    { type: "invariant", id: "no_arbitrary_eval", summary: "custom_expression transform is intentionally NOT implemented — arbitrary-expression evaluation is a security risk, not a missing feature." },
+    { type: "invariant", id: "surface_dont_resolve_ambiguity", summary: "Ambiguous input (DST fold/gap, place-name aliases) is surfaced with candidates or status, never silently resolved to one answer." },
+    { type: "invariant", id: "per_item_error_isolation", summary: "Temporal Groups expand and the Constraint Planner isolate per-member/per-constraint errors so one bad input doesn't fail the whole request." },
+    { type: "invariant", id: "escape_user_content", summary: "User-supplied content (e.g. instant labels) is HTML-escaped before rendering on any human page — verified against stored and reflected XSS on the Share Instant page." },
+    { type: "pipeline", id: "convert", summary: "input value+encoding -> canonical BigInt ns -> output value+encoding/timezone, with a lossless flag and DST-ambiguity detection." },
+    { type: "pipeline", id: "group_expand", summary: "one instant (registered id, explicit value, or now) resolved across every member of a Temporal Group -> per-member local representation or graceful per-member error." },
+    { type: "endpoint", id: "v1_now", method: "GET", path: "/v1/now", summary: "Verified reference instant: encodings, timescales, source, quality, optional Ed25519 signature, stable instant_id." },
+    { type: "endpoint", id: "v1_convert", method: "POST", path: "/v1/convert", summary: "Precision-preserving cross encoding/timescale/timezone conversion; DST-ambiguity-aware." },
+    { type: "endpoint", id: "v1_temporal_groups_expand", method: "POST", path: "/v1/temporal-groups/{id}/expand", summary: "Project one instant across every member of a group — the flagship 'One Instant, Many Systems' feature." },
+    { type: "endpoint", id: "v1_boundaries_inspect", method: "POST", path: "/v1/boundaries/inspect", summary: "Proactive gap/fold/pause/rate_change status check that never errors, unlike /v1/convert." },
+    { type: "endpoint", id: "v1_resolve", method: "POST", path: "/v1/resolve", summary: "resolve_temporal_context: ambiguous place/alias/abbreviation input to IANA candidates with confidence; never silently disambiguates." },
+    { type: "endpoint", id: "v1_planner_shared_instant", method: "POST", path: "/v1/planner/shared-instant", summary: "plan_shared_instant: bounded constraint solver for a best shared instant; a demonstration, not a full meeting-scheduler SaaS." },
+    { type: "deprecated", id: "unbounded_axiom_ctcl", summary: "CTCL's original in-repo location (ctcl/worker.js inside unbounded-axiom) is stale history; canonical source moved to its own repo on 2026-07-11." },
+    { type: "rights", id: "license_status", summary: "No LICENSE has been chosen yet as of 2026-07-11 — see governance/license.md and rights-spectrum.json for the honest current (undecided) state." },
+  ];
+  return units.map((u) => JSON.stringify(u)).join("\n") + "\n";
+}
+
+const SPECS_CTCL_V1_MD = `# CTCL v1 — normative digest
+
+This is a compact, agent-facing digest of the API's actual behavior. It is derived from
+the same router as the live deployment; where it disagrees with the running Worker, the
+Worker is right.
+
+## Core formula
+
+    tau_i = Phi_i(I*)
+
+I* is a shared reference instant. Phi_i is system i's own transform (epoch, rate,
+offset, timezone, calendar, or policy). tau_i is that system's local time. Systems never
+need to share a clock, calendar, or epoch — only agree on I*.
+
+## Response envelope
+
+Success: {ok: true, data: {...}, meta: {api_version, request_id, ...}}.
+Failure:  {ok: false, error: {code, message, details}, meta: {api_version, request_id}}.
+This shape is frozen for API version v1 (see governance/versioning-policy.md).
+
+## Encodings and timescales
+
+Encodings: unix_s, unix_ms, unix_us, unix_ns, rfc3339 (iso8601 accepted as an alias).
+Timescales: utc (civil reference, includes leap seconds), posix (unix time, leap
+seconds flattened), tai and gps (approximate — a flat +37s/+18s offset as of 2017-01-01,
+not a live leap table).
+
+## MUST / SHOULD
+
+- A client MUST treat quality.precision and quality.estimated_uncertainty_ns as
+  authoritative over any assumption drawn from the presence of ns/us fields.
+- A client MUST NOT silently pick one candidate when /v1/resolve or the Boundary
+  Inspector returns more than one — surface the ambiguity.
+- A client SHOULD store an instant_id (from /v1/instants) for anything that needs to be
+  recalled later, rather than a bare numeric timestamp.
+- A client SHOULD check /v1/planner/constraint-types before relying on a constraint
+  type in /v1/planner/shared-instant — unsupported types are reported per-item, not
+  silently dropped, but they also don't count toward a plan's satisfied score.
+- A server extension MUST NOT remove or repurpose an existing field in the v1 envelope;
+  new capability ships as additive fields or as a new /v2 surface.
+
+## Error codes
+
+See ai/tools/tools.md or the human /developers page for the full table with HTTP
+status codes and one-line descriptions; the canonical list is also declared in
+ai/specs/error-schema.json's error.code description.
+
+## Endpoint index
+
+now, timescales, encodings, convert, transform, instants (create/get), i/{id} (human
+share page), systems (create/list/get/now), path, temporal-groups (create/list/get/
+expand), boundaries/inspect, resolve, planner/shared-instant, planner/constraint-types,
+validate, transforms (catalog), version, pubkey. Full detail: /openapi.json and
+/ai/ctcl.json.
+`;
+
+const SPECS_INSTANT_SCHEMA = {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://commoninstant.org/ai/specs/instant-schema.json",
+  title: "CTCL Instant Envelope", type: "object",
+  required: ["instant", "encodings", "timescales", "source", "quality", "policy"],
+  properties: {
+    instant: { type: "object", required: ["id", "reference"], properties: {
+      id: { type: "string", pattern: "^ctcl:instant:" },
+      reference: { type: "object", required: ["timescale", "value"], properties: {
+        timescale: { type: "string", enum: ["utc", "posix", "tai", "gps"] }, value: { type: "string" } } } } },
+    encodings: { type: "object", properties: { unix_s: { type: "string" }, unix_ms: { type: "string" }, unix_us: { type: "string" }, unix_ns: { type: "string" }, rfc3339: { type: "string" } } },
+    timescales: { type: "object", properties: { utc: { type: "string" }, posix: { type: "string" }, tai_approx: { type: "string" }, gps_approx: { type: "string" } } },
+    source: { type: "object", properties: { class: { type: "string" }, protocol: { type: "string" }, provider: { type: "string" }, sync_status: { type: "string" } } },
+    quality: { type: "object", properties: { precision: { type: "string" }, estimated_uncertainty_ns: { type: "number" }, synchronized: { type: "boolean" }, note: { type: "string" } } },
+    policy: { type: "object", properties: { leap_second: { type: "string" }, leap_table: { type: "object" } } },
+    signature: { type: "object", description: "present only when CTCL_SIGN_KEY is configured on the deployment", properties: { alg: { const: "Ed25519" }, key_id: { type: "string" }, signed_fields: { type: "string" }, value: { type: "string" }, verify: { type: "string" } } },
+  },
+};
+
+const SPECS_ERROR_SCHEMA = {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://commoninstant.org/ai/specs/error-schema.json",
+  title: "CTCL Error Envelope", type: "object", required: ["ok", "error", "meta"],
+  properties: {
+    ok: { const: false },
+    error: { type: "object", required: ["code", "message"], properties: {
+      code: { type: "string", description: "see ai/tools/tools.md or /developers for the full code table" },
+      message: { type: "string" }, details: { type: "object" } } },
+    meta: { type: "object", properties: { api_version: { type: "string" }, request_id: { type: "string" } } },
+  },
+};
+
+const SPECS_SYSTEM_SCHEMA = {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://commoninstant.org/ai/specs/system-schema.json",
+  title: "CTCL Custom Temporal System", type: "object", required: ["id", "rate"],
+  properties: {
+    id: { type: "string", description: "e.g. user:game_world, agent:a:life" },
+    parent: { type: "string", default: "ctcl:system:unix" },
+    epoch: { type: "object", properties: { parent_value: { type: "string" }, encoding: { type: "string", default: "unix_s" } } },
+    rate: { type: "object", required: ["type"], properties: {
+      type: { type: "string", enum: ["constant", "piecewise", "paused", "table"] },
+      value: { type: "number", description: "used when type=constant, or as the multiplier for type=paused" },
+      segments: { type: "array", description: "type=piecewise: [{until: unix_s|null, rate: number}]" },
+      pauses: { type: "array", description: "type=paused: [{from: unix_s, to: unix_s|null}]" },
+      table: { type: "array", description: "type=table: [{parent: unix_s, local: seconds}]" } } },
+    offset: { type: "number", default: 0 },
+    calendar: { type: "object", properties: { day_seconds: { type: "integer" }, year_days: { type: "integer" } } },
+  },
+};
+
+const SPECS_GROUP_SCHEMA = {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://commoninstant.org/ai/specs/group-schema.json",
+  title: "CTCL Temporal Group", type: "object", required: ["id", "members"],
+  properties: {
+    id: { type: "string", description: "e.g. group:project-alpha" },
+    members: { type: "array", items: { type: "string" }, description: "each item is \"utc\"|\"posix\"|\"tai\"|\"gps\" (builtin), \"tz:<IANA>\" (civil local time), or a stored custom system id" },
+    owner: { type: ["string", "null"] },
+    version: { type: "string", description: "auto-incremented on every re-POST of the same id" },
+  },
+};
+
+const AI_EXAMPLES = {
+  "000-verified-instant.md": `# Example: get a verified reference instant
+
+Request:
+
+    curl -s https://commoninstant.org/v1/now
+
+The response shape (values change every call): instant.id, instant.reference.value,
+encodings for unix_s/unix_ms/unix_us/unix_ns/rfc3339, timescales for utc/posix/
+tai_approx/gps_approx, source (edge_wall_clock, cloudflare, synchronized), quality
+(millisecond_representation, estimated_uncertainty_ns 5000000), policy.leap_table, and
+an optional Ed25519 signature.
+
+Notes:
+
+- quality.precision is honest: this is a millisecond-grade edge wall clock. The ns and
+  us fields are zero-padded for format compatibility, not a claim of nanosecond
+  accuracy.
+- signature is present only when the deployment has an Ed25519 signing key configured;
+  verify it with the SDK's verifyInstant() against GET /v1/pubkey.
+- The response carries Cache-Control: no-store — every call gets a fresh instant.
+`,
+  "001-multi-agent-alignment.md": `# Example: two agents align on the exact same instant
+
+Agent A registers a reference instant and shares its id:
+
+    curl -s -X POST https://commoninstant.org/v1/instants \\
+      -H 'content-type: application/json' -d '{"label":"handoff"}'
+
+That returns an id (ctcl:instant:...) and a share URL (https://commoninstant.org/i/...).
+
+Agent B — a different process, a different session, or a human via the share URL —
+retrieves the exact same instant:
+
+    curl -s https://commoninstant.org/v1/instant/ctcl:instant:...
+
+Both calls return identical unix_ns. This is the multi-agent alignment primitive: store
+the instant_id, not a bare timestamp number, and any later reader reconstructs the same
+reference point exactly.
+`,
+  "002-precision-preserving-convert.md": `# Example: precision-preserving conversion
+
+    curl -s -X POST https://commoninstant.org/v1/convert -H 'content-type: application/json' -d '{
+      "input":  {"value":"1783420000.123456789","encoding":"unix_s"},
+      "output": {"encoding":"rfc3339","timezone":"Asia/Taipei"}
+    }'
+
+The response includes canonical_unix_ns (the full-precision value the caller supplied,
+preserved exactly) and quality.lossless (whether the chosen output encoding can
+represent that value without truncation — rfc3339 can, unix_s alone cannot).
+Conversion never claims to improve precision — it preserves whatever the caller
+supplied, because this is offline math, not the wall clock.
+
+A naive local time can also be disambiguated in the same call: pass input.timezone with
+no offset in the value, and CTCL returns NONEXISTENT_LOCAL_TIME or
+AMBIGUOUS_LOCAL_TIME rather than silently guessing.
+`,
+  "003-custom-world-clock.md": `# Example: a custom accelerated world clock
+
+    curl -s -X POST https://commoninstant.org/v1/systems -H 'content-type: application/json' -d '{
+      "id": "user:game_world",
+      "epoch": {"parent_value": "1700000000"},
+      "rate": {"value": 20}
+    }'
+
+This world runs 20x real time from epoch 1700000000 (unix_s). Read its current time:
+
+    curl -s https://commoninstant.org/v1/systems/user%3Agame_world/now
+
+A paused rate type additionally tracks active_elapsed_s (wall time minus paused time) —
+the mechanism behind agent life-history clocks (the SDK's lifeHistory() and lifeNow()):
+an agent's experienced time excludes suspended or offline periods.
+`,
+  "004-one-instant-many-systems.md": `# Example: One Instant, Many Systems
+
+Create a group once:
+
+    curl -s -X POST https://commoninstant.org/v1/temporal-groups -H 'content-type: application/json' -d '{
+      "id": "group:demo",
+      "members": ["utc", "tai", "tz:Asia/Taipei", "tz:America/New_York", "user:game_world"]
+    }'
+
+Then project any instant across every member in one call:
+
+    curl -s -X POST https://commoninstant.org/v1/temporal-groups/group:demo/expand \\
+      -H 'content-type: application/json' -d '{}'
+
+Each member resolves independently — an unknown system id or invalid timezone produces
+a per-member error field rather than failing the whole request (see
+corpus/engineering-notes.md, "per-item error isolation"). This is CTCL's most direct
+demonstration of "same instant, different representations."
+`,
+  "005-boundary-inspection.md": `# Example: proactively checking a temporal boundary
+
+    curl -s -X POST https://commoninstant.org/v1/boundaries/inspect -H 'content-type: application/json' -d '{
+      "timezone": "America/New_York",
+      "local_value": "2026-11-01T01:30:00"
+    }'
+
+This returns status "fold" (this local time occurred twice, during the US fall-back
+transition) with both candidate UTC instants — never a silent guess. Compare
+/v1/convert, which errors (AMBIGUOUS_LOCAL_TIME) on the same input; the Boundary
+Inspector is the pre-flight version that always returns a status object, useful for an
+agent deciding whether it's safe to schedule something at a given local time.
+
+The same endpoint also inspects a custom system for pause or rate_change boundaries —
+pass {"system_id": "...", "value": "..."} instead of {timezone, local_value}.
+`,
+  "006-constraint-planning.md": `# Example: solving for a shared instant under constraints
+
+    curl -s -X POST https://commoninstant.org/v1/planner/shared-instant -H 'content-type: application/json' -d '{
+      "window": {"from": 1783784219, "to": 1784389019, "step_s": 1800},
+      "constraints": [
+        {"type": "weekday_hours", "timezone": "Asia/Taipei", "days": [1,2,3,4,5], "start": "09:00", "end": "18:00", "weight": 2},
+        {"type": "avoid_window", "from": 1783870619, "to": 1783877819, "weight": 1},
+        {"type": "min_lead_time", "seconds": 3600, "weight": 1}
+      ]
+    }'
+
+This returns the best-scoring instant plus up to three distinct alternatives and a
+plain-language explanation. This is a demonstration of CTCL-native constraint solving,
+explicitly not a full meeting-scheduler SaaS — see GET /v1/planner/constraint-types for
+exactly which constraint types are honestly implemented versus declared unsupported (no
+external data feed, not faked).
+`,
+};
+
+function toolsCatalog(origin) {
+  const decl = toolDeclaration(origin);
+  return {
+    "$schema": "aicl-capability/0.1",
+    generated_from: "same source as /ai/ctcl.json — cannot drift from it",
+    error_schema: "/ai/specs/error-schema.json",
+    schemas: { instant: "/ai/specs/instant-schema.json", system: "/ai/specs/system-schema.json", group: "/ai/specs/group-schema.json" },
+    rate_limit: "120 requests/min per IP on /v1/* (whitepaper section 38)",
+    permission: "public — no auth required, subject to the rate limit above",
+    tools: decl.tools,
+  };
+}
+
+const AI_TOOLS_MD = `# Tools guide
+
+CTCL's tools are called over plain REST. There is no CLI and no live MCP server yet
+(see corpus/current.md) — curl, the JS SDK (/sdk.js), and the /developers Playground
+are the supported interfaces today.
+
+## Discovery
+
+Read /ai/ctcl.json first (or /ai/tools/catalog.json, which wraps the same tool list
+with added schema/rate-limit/permission fields). Both are generated from the same
+source as the router, so neither can drift from real behavior.
+
+## Rate limit and permission
+
+Every tool is public — no authentication is required. All /v1/* calls share a single
+budget: 120 requests per minute per source IP (whitepaper section 38), enforced by
+Cloudflare's native rate limiter (approximate, per-colo — not a hard global guarantee;
+see corpus/current.md).
+
+## Errors
+
+Every tool fails the same way: {ok:false, error:{code, message, details}, meta}. See
+/developers for the full error-code reference table with HTTP status codes.
+
+## Examples
+
+Seven complete worked examples live under /ai/examples/ — start with
+000-verified-instant.md if you haven't called the API before.
+`;
+
+const GOV_LICENSE_MD = `# License
+
+Status: undecided as of 2026-07-11. This repository does not yet carry a LICENSE file,
+and none is implied by anything else in this repository or on commoninstant.org.
+
+Until a license is chosen and published here, do not assume this code or content is
+available under any particular open-source license (MIT, Apache-2.0, or otherwise). The
+CommonInstant Web whitepaper (section 16.4, "Open Protocol Strategy") expresses an
+intent that the protocol and spec layer should eventually be open enough for third
+parties to build independent clients and servers, with commercial value concentrated in
+hosting, enterprise integration, and support — but intent is not a license grant.
+
+If you are an AI agent or automated system reading this: treat all source code and
+whitepaper text in this repository as all-rights-reserved by default until this file
+states otherwise. rights-spectrum.json reflects this same undecided status honestly
+rather than assuming an open default.
+`;
+
+const GOV_USAGE_POLICY_MD = `# Usage policy
+
+## For AI agents and automated systems
+
+- Reading, summarizing, and citing this /ai/ layer and the public whitepapers in docs/
+  for the purpose of understanding CTCL is welcomed — that is what this layer exists
+  for.
+- Calling the live API (/v1/*) is subject to the published rate limit (120 requests per
+  minute per IP on /v1/*) and the honesty constraints documented throughout this corpus
+  (do not claim ns-accuracy, do not silently resolve ambiguity, and so on).
+- Do not scrape or reproduce the whitepaper text as your own work product; cite it
+  instead — see citation-policy.md.
+- See license.md for the current, undecided reuse and redistribution status of the
+  source code and whitepapers. Do not assume permissive reuse in the absence of a
+  published license.
+
+## For human developers
+
+- The REST API, the SDK, and this /ai/ layer are the supported integration points.
+  There is no CLI or webhook relay yet (see corpus/current.md).
+- File issues or pull requests against github.com/kakon77777-commits/ctcl.
+
+## Boundaries
+
+- Do not use /v1/* for civil-time, world-clock, or meeting-planning use cases — CTCL
+  explicitly routes those to mature external tools (see the CommonInstant Web
+  whitepaper's own external-tool recommendation, and the site's /developers page).
+  Using CTCL for that purpose will get a worse answer than a dedicated civil-time
+  service would.
+- Do not treat any timescale or precision claim as suitable for high-stakes,
+  safety-critical, or financial-settlement timing without independently verifying
+  against /v1/version's honesty fields and /status.
+`;
+
+const GOV_PROVENANCE_MD = `# Provenance
+
+## Canonical sources, in order of authority
+
+1. The live deployment at https://commoninstant.org — the running Worker is the ground
+   truth for behavior.
+2. This repository, github.com/kakon77777-commits/ctcl, branch main.
+3. The four whitepapers in docs/ (theory, Agent Time API, CommonInstant Web, Temporal
+   Port App) — the design intent the implementation is built against.
+4. This /ai/ corpus — a derived, kept-in-sync summary of items 1 through 3 above, not
+   an independent source of truth.
+
+## Known stale copies
+
+- A copy of CTCL's original implementation exists inside Neo.K's unbounded-axiom
+  (Logic Matrix) repository, from before the 2026-07-11 migration to this standalone
+  repo. That copy is historical and should not be treated as current.
+- A stale master branch lingers on this repository's GitHub remote from initial repo
+  creation; main is the only branch that receives updates.
+
+## How to tell a genuine CTCL instant from a forged one
+
+GET /v1/now signs its response with Ed25519 when a signing key is configured on the
+deployment (a signature field appears). Verify it against the published public key at
+GET /v1/pubkey, or use the SDK's verifyInstant(). The absence of a signature field means
+the deployment has no signing key configured (see /status for live signing status) — it
+does not by itself indicate forgery.
+`;
+
+const GOV_CITATION_POLICY_MD = `# Citation policy
+
+If you cite CTCL — in a paper, a tool's training-data attribution, a derived work, or
+an AI system's sourcing — a preferred citation is:
+
+    CTCL (Common Temporal Coordinate Layer), Neo.K / EveMissLab, 2026.
+    https://commoninstant.org — accessed <date>.
+
+For a specific claim, prefer citing the specific source:
+
+- API behavior: the live deployment plus this repository's src/worker.js at a specific
+  commit.
+- Design intent: the specific whitepaper file in docs/.
+- A specific concept's status (frozen, stable, or prototype):
+  corpus/concept-genealogy.md.
+
+Prefer corpus/public-summary.md when a short, stable, citable description is needed —
+it changes less often than the whitepapers or the live feature set.
+`;
+
+const GOV_CRAWLER_POLICY_MD = `# Crawler policy
+
+Recommended reading order for any crawler or agent visiting cold:
+
+    /llms.txt
+    /ai/index.md
+    /ai/manifest.json
+    /ai/corpus/current.md
+    /ai/rights-spectrum.json
+    /ai/governance/  (this directory)
+
+There is no robots.txt-level disallow on this deployment as of 2026-07-11 — the public
+API and /ai/ layer are meant to be read by both humans and machines. No cloaking: every
+route here returns the same content regardless of User-Agent.
+
+Automated calls to the stateful /v1/* endpoints (not just the static /ai/* content) are
+subject to the same 120-requests-per-minute-per-IP limit as any other caller. Crawling
+the /ai/ documentation tree itself is not separately rate-limited beyond Cloudflare's
+general edge protections, since those routes are static content, not the KV-backed API.
+`;
+
+const GOV_VERSIONING_POLICY_MD = `# Versioning policy
+
+- API: all routes are v1. The envelope shape ({ok,data,meta} or
+  {ok:false,error,meta}) will not change within v1; new optional fields may be added. A
+  breaking change ships as v2, never a silent mutation of v1 — see /developers for the
+  same statement in the human Developer Console.
+- This /ai/ layer: versioned independently (ai/version.json's aicl_layer_version),
+  since it can be extended — new corpus files, new examples — without touching the API
+  surface at all.
+- Precedence when documents disagree: the live deployment, then this repository's
+  src/worker.js, then the whitepapers in docs/ (design intent, may run ahead of
+  implementation), then this /ai/ corpus (a derived summary, may occasionally lag a
+  same-day change until the next update pass).
+- Whitepapers: each is independently versioned in its own filename (a trailing
+  _v0.1.md); a new version gets a new filename rather than overwriting history.
+`;
+
+function rightsSpectrum() {
+  return {
+    "$schema": "aicl-airs/0.1",
+    subject: "https://commoninstant.org", repository: "https://github.com/kakon77777-commits/ctcl",
+    declared_by: "Neo.K / EveMissLab", declaration_date: "2026-07-11",
+    license_status: "undecided — no LICENSE file published as of 2026-07-11; see governance/license.md. This spectrum reflects a conservative default until a license is chosen, not an open-source grant.",
+    default_policy: {
+      access: 1.0, indexing: 1.0, summarization: 0.7, quotation: 0.7, inference_input: 0.5, embedding: 0.3,
+      training: "license_required", fine_tuning: "license_required", distillation: "license_required",
+      verbatim_memory: "case_by_case", commercial_use: "license_required", redistribution: "license_required",
+      attribution: "required", compensation: "not_required_for_reading_or_citation",
+    },
+    paths: [
+      { path: "/ai/", note: "designed to be read and ingested by AI systems — access, indexing, summarization, and inference_input are all effectively 1.0 here; this is the whole point of the layer" },
+      { path: "/docs/", note: "the whitepapers — read and cite freely per citation-policy.md; do not redistribute verbatim as your own work" },
+      { path: "/src/", note: "source code — see governance/license.md; no reuse license granted yet" },
+    ],
+    licensing_options: [
+      { id: "contact-for-license", summary: "No formal license tiers exist yet. Contact via the repository for any reuse beyond reading or citation.", price: null },
+    ],
+    related_standards: {
+      robots_txt: "not yet published on this deployment", llms_txt: "/llms.txt",
+      note: "This declaration follows the AIRS/AILP pattern from Neo.K's AICR&AICL whitepapers, as also implemented for the EML and PHOSPHOR projects — a rights/licensing declaration about how AI may use this content, not a claim about any AI system's own rights.",
+    },
+    disclaimer: "This is a declaration layer, not an enforcement mechanism or a legal contract. Where this file and a future published LICENSE disagree, the LICENSE governs.",
+  };
+}
+
+function aiFileRegistry(origin) {
+  const reg = {
+    "/ai/index.md": { type: "md", body: AI_INDEX_MD },
+    "/ai/manifest.json": { type: "json", body: aiManifest(origin) },
+    "/ai/version.json": { type: "json", body: AI_VERSION_JSON },
+    "/ai/sitemap.json": { type: "json", body: AI_SITEMAP_JSON },
+    "/ai/rights-spectrum.json": { type: "json", body: rightsSpectrum() },
+    "/ai/corpus/origin.md": { type: "md", body: CORPUS_ORIGIN_MD },
+    "/ai/corpus/current.md": { type: "md", body: CORPUS_CURRENT_MD },
+    "/ai/corpus/design-history.md": { type: "md", body: CORPUS_DESIGN_HISTORY_MD },
+    "/ai/corpus/concept-genealogy.md": { type: "md", body: CORPUS_CONCEPT_GENEALOGY_MD },
+    "/ai/corpus/engineering-notes.md": { type: "md", body: CORPUS_ENGINEERING_NOTES_MD },
+    "/ai/corpus/accepted-concepts.md": { type: "md", body: CORPUS_ACCEPTED_CONCEPTS_MD },
+    "/ai/corpus/deprecated-concepts.md": { type: "md", body: CORPUS_DEPRECATED_CONCEPTS_MD },
+    "/ai/corpus/public-summary.md": { type: "md", body: CORPUS_PUBLIC_SUMMARY_MD },
+    "/ai/corpus/full-corpus.jsonl": { type: "jsonl", body: corpusFullJsonl() },
+    "/ai/specs/ctcl-v1.md": { type: "md", body: SPECS_CTCL_V1_MD },
+    "/ai/specs/instant-schema.json": { type: "json", body: SPECS_INSTANT_SCHEMA },
+    "/ai/specs/error-schema.json": { type: "json", body: SPECS_ERROR_SCHEMA },
+    "/ai/specs/system-schema.json": { type: "json", body: SPECS_SYSTEM_SCHEMA },
+    "/ai/specs/group-schema.json": { type: "json", body: SPECS_GROUP_SCHEMA },
+    "/ai/tools/catalog.json": { type: "json", body: toolsCatalog(origin) },
+    "/ai/tools/tools.md": { type: "md", body: AI_TOOLS_MD },
+    "/ai/governance/license.md": { type: "md", body: GOV_LICENSE_MD },
+    "/ai/governance/usage-policy.md": { type: "md", body: GOV_USAGE_POLICY_MD },
+    "/ai/governance/provenance.md": { type: "md", body: GOV_PROVENANCE_MD },
+    "/ai/governance/citation-policy.md": { type: "md", body: GOV_CITATION_POLICY_MD },
+    "/ai/governance/crawler-policy.md": { type: "md", body: GOV_CRAWLER_POLICY_MD },
+    "/ai/governance/versioning-policy.md": { type: "md", body: GOV_VERSIONING_POLICY_MD },
+  };
+  for (const [name, body] of Object.entries(AI_EXAMPLES)) reg["/ai/examples/" + name] = { type: "md", body };
+  return reg;
+}
+function aiFileResponse(f) {
+  const ct = f.type === "json" ? "application/json; charset=utf-8" : f.type === "jsonl" ? "application/x-ndjson; charset=utf-8" : "text/markdown; charset=utf-8";
+  const body = f.type === "json" ? JSON.stringify(f.body, null, 2) + "\n" : f.body;
+  return new Response(body, { headers: { "Content-Type": ct, ...CORS, "Cache-Control": "public, max-age=600" } });
+}
+
 // ---- router ----------------------------------------------------------------
 
 export default {
@@ -1310,6 +2369,11 @@ export default {
     if (p.startsWith("/i/")) return instantSharePage(origin, decodeURIComponent(p.slice(3)), env);
     if (p === "/status") return new Response(statusPage(), { headers: { "Content-Type": "text/html; charset=utf-8", ...CORS } });
     if (p === "/developers") return new Response(developerConsolePage(), { headers: { "Content-Type": "text/html; charset=utf-8", ...CORS } });
+    if (p === "/llms.txt") return new Response(LLMS_TXT, { headers: { "Content-Type": "text/plain; charset=utf-8", ...CORS, "Cache-Control": "public, max-age=600" } });
+    if (p.startsWith("/ai/") && p !== "/ai/ctcl.json") {
+      const f = aiFileRegistry(origin)[p];
+      if (f) return aiFileResponse(f);
+    }
     if (p === "/v1/path") return transformPath(url, env);
     if (p === "/v1/validate" && request.method === "POST") return validateTime(request);
     if (p === "/v1/transforms") return transformsCatalog(null);

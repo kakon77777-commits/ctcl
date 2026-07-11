@@ -140,4 +140,29 @@ version policy, changelog). The homepage also gained the whitepaper's Appendix A
 quick-task nav (Create Instant / Convert / Expand Group / Inspect Boundary / Create
 Group / Developer Console) as anchor links into existing sections.
 
+## AICL / AIRS-AILP layer (`/ai/`, `/llms.txt`)
+
+CTCL now carries the same AI Ingestion & Capability Layer (AICL) + AI Rights
+Spectrum / AI Learning Permission (AIRS/AILP) pattern Neo.K previously applied to the
+EML and PHOSPHOR projects — four sublayers, served as static markdown/JSON with no
+build step (consistent with this Worker's own architecture):
+
+- **Manifest** — `/llms.txt`, `/ai/index.md`, `/ai/manifest.json`, `/ai/version.json`,
+  `/ai/sitemap.json`.
+- **Corpus** — `/ai/corpus/{origin,current,design-history,concept-genealogy,
+  engineering-notes,accepted-concepts,deprecated-concepts,public-summary}.md` +
+  `/ai/corpus/full-corpus.jsonl`.
+- **Capability** — `/ai/specs/{ctcl-v1.md, instant/error/system/group-schema.json}`,
+  seven worked examples under `/ai/examples/`, and `/ai/tools/{catalog.json,tools.md}`
+  (the catalog is generated from the same source as `/ai/ctcl.json`, so it cannot
+  drift from real behavior).
+- **Governance/Rights** — `/ai/governance/{license,usage-policy,provenance,
+  citation-policy,crawler-policy,versioning-policy}.md` + `/ai/rights-spectrum.json`.
+
+**Honest note on the rights spectrum:** this repository does not yet have a published
+LICENSE. Rather than assume an open default, `rights-spectrum.json` and
+`governance/license.md` state that plainly — reading/summarization/citation are
+welcomed, but training/fine-tuning/commercial-use/redistribution are marked
+`license_required` until a license is actually chosen and published.
+
 Migrated out of the `unbounded-axiom` repo into this standalone project on 2026-07-11.
