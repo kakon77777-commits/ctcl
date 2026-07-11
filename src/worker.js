@@ -389,6 +389,98 @@ async function transformPath(url, env) {
     note: "Star graph: custom systems route through ctcl:system:unix; unix/utc/posix are identity peers. This is the route — map a value with POST /v1/transform or /v1/convert. Path selection (uncertainty/trust) arrives with a real multi-hop graph." });
 }
 
+// ---- Temporal Groups (P1 — CommonInstant Web whitepaper §5.5/§8.1) ---------
+// G = (id, members, owner, version). A member is "utc"|"posix"|"tai"|"gps"
+// (builtin timescale), "tz:<IANA>" (civil local time), or a bare id already
+// stored under system:<id> (custom/life-history system). Expanding ONE instant
+// across a group's members is CTCL's flagship differentiator:
+//   E(I*, G) = { tau_1, ..., tau_n }  — "One Instant, Many Systems".
+const BUILTIN_TS = { utc: "utc", posix: "posix", tai: "tai_approx", gps: "gps_approx" };
+
+async function resolveMember(member, ns, env) {
+  const m = String(member);
+  if (BUILTIN_TS[m]) {
+    const v = instantViews(ns);
+    return { member: m, kind: "builtin", value: v.timescales[BUILTIN_TS[m]], encoding: m === "utc" ? "rfc3339" : "unix_s" };
+  }
+  if (m.startsWith("tz:")) {
+    const tz = m.slice(3);
+    try { return { member: m, kind: "timezone", timezone: tz, value: rfc3339(ns, tz), encoding: "rfc3339" }; }
+    catch (e) { return { member: m, kind: "timezone", error: "INVALID_TIMEZONE", message: `unrecognized IANA timezone: ${tz}` }; }
+  }
+  if (!env || !env.CTCL_KV) return { member: m, kind: "system", error: "REGISTRY_UNAVAILABLE" };
+  const raw = await env.CTCL_KV.get("system:" + m);
+  if (!raw) return { member: m, kind: "system", error: "UNKNOWN_SYSTEM", message: `no such system: ${m}` };
+  const sys = JSON.parse(raw);
+  let epochNs;
+  try { epochNs = toNs(sys.epoch?.parent_value ?? 0, sys.epoch?.encoding || "unix_s"); }
+  catch { epochNs = 0n; }
+  const { local, extra } = localSeconds(sys, Number(ns) / 1e9, Number(epochNs) / 1e9);
+  return { member: m, kind: "system", value: String(local), unit: "second", rate_type: (sys.rate && sys.rate.type) || "constant", ...extra };
+}
+
+async function createGroup(req, env) {
+  if (!env || !env.CTCL_KV) return kvMissing();
+  let body;
+  try { body = await req.json(); } catch { return fail("INVALID_TIME_VALUE", "body must be JSON"); }
+  const grp = body.group || body;
+  if (!grp.id) return fail("INVALID_TIME_VALUE", "group.id required (e.g. group:project-alpha)");
+  if (!Array.isArray(grp.members) || !grp.members.length) return fail("INVALID_TIME_VALUE", "group.members must be a non-empty array of \"utc\"|\"posix\"|\"tai\"|\"gps\"|\"tz:<IANA>\"|<system id>");
+  const existingRaw = await env.CTCL_KV.get("group:" + grp.id);
+  const existing = existingRaw ? JSON.parse(existingRaw) : null;
+  const rec = {
+    id: grp.id, members: grp.members, owner: grp.owner || (existing && existing.owner) || null,
+    version: String(existing ? Number(existing.version || "1") + 1 : 1),
+    created_at: existing ? existing.created_at : new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  await env.CTCL_KV.put("group:" + grp.id, JSON.stringify(rec));
+  return ok({ ...rec, expand: `/v1/temporal-groups/${encodeURIComponent(grp.id)}/expand` },
+    { note: "POST /v1/temporal-groups/{id}/expand to project one instant across every member (§5.5 \"One Instant, Many Systems\")." });
+}
+
+async function getGroup(id, env) {
+  if (!env || !env.CTCL_KV) return kvMissing();
+  const raw = await env.CTCL_KV.get("group:" + id);
+  if (!raw) return fail("UNKNOWN_GROUP", `no such group: ${id}`, {}, 404);
+  return ok(JSON.parse(raw));
+}
+
+async function listGroups(env) {
+  if (!env || !env.CTCL_KV) return kvMissing();
+  const l = await env.CTCL_KV.list({ prefix: "group:" });
+  const groups = l.keys.map((k) => k.name.replace(/^group:/, ""));
+  return ok({ count: groups.length, groups, truncated: !l.list_complete,
+    note: "GET /v1/temporal-groups/{id} for a definition; POST .../expand to project an instant across all members." });
+}
+
+async function expandGroup(id, req, env) {
+  if (!env || !env.CTCL_KV) return kvMissing();
+  const raw = await env.CTCL_KV.get("group:" + id);
+  if (!raw) return fail("UNKNOWN_GROUP", `no such group: ${id}`, {}, 404);
+  const grp = JSON.parse(raw);
+  let body = {};
+  try { body = await req.json(); } catch { /* empty body -> expand "now" */ }
+  let ns, source;
+  if (body.instant_id) {
+    const rawI = await env.CTCL_KV.get("instant:" + uuidOf(body.instant_id));
+    if (!rawI) return fail("UNKNOWN_INSTANT", `no registered instant: ${body.instant_id}`, {}, 404);
+    ns = BigInt(JSON.parse(rawI).unix_ns); source = "registered_instant";
+  } else if (body.value != null) {
+    try { ns = toNs(body.value, body.encoding); }
+    catch (e) { return fail(e.code || "INVALID_TIME_VALUE", e.msg || String(e)); }
+    source = "explicit_value";
+  } else {
+    ns = BigInt(Date.now()) * NS_PER.ms; source = "now";
+  }
+  const members = await Promise.all(grp.members.map((m) => resolveMember(m, ns, env)));
+  return ok({
+    group_id: grp.id, group_version: grp.version,
+    instant: { source, unix_ns: ns.toString(), rfc3339: rfc3339(ns, "UTC") },
+    members,
+  }, {}, "no-store");
+}
+
 // ---- endpoints -------------------------------------------------------------
 
 async function handleConvert(req) {
@@ -485,6 +577,12 @@ function toolDeclaration(origin) {
       { name: "system-now", method: "GET", path: "/v1/systems/{id}/now", desc: "Current time in a stored custom system (+ world calendar).", input: { id: "string" }, output: "system_time + reference instant + calendar" },
       { name: "list-systems", method: "GET", path: "/v1/systems", desc: "List all stored custom systems.", input: {}, output: "system ids" },
       { name: "transform-path", method: "GET", path: "/v1/path", desc: "Route between two systems/timescales in the transform graph (§13-14; star graph today).", input: { from: "system id or unix|utc|posix", to: "…" }, output: "path + hops + lossless" },
+      { name: "create-group", method: "POST", path: "/v1/temporal-groups", desc: "Persist a Temporal Group — a named set of members (\"utc\"|\"posix\"|\"tai\"|\"gps\"|\"tz:<IANA>\"|<system id>). Re-posting the same id bumps its version.",
+        input: { id: "group:project-alpha", members: ["utc", "tz:Asia/Taipei", "user:game_world"], owner: "string?" }, output: "group record + expand URL" },
+      { name: "get-group", method: "GET", path: "/v1/temporal-groups/{id}", desc: "Retrieve a Temporal Group definition.", input: { id: "string" }, output: "group record" },
+      { name: "list-groups", method: "GET", path: "/v1/temporal-groups", desc: "List all stored Temporal Groups.", input: {}, output: "group ids" },
+      { name: "expand-group", method: "POST", path: "/v1/temporal-groups/{id}/expand", desc: "THE CommonInstant Web flagship: project ONE instant across every member of a group — E(I*, G) = {τ1,...,τn}, \"One Instant, Many Systems\". Default instant is now; pass instant_id to align on a previously-registered I*, or an explicit value+encoding.",
+        input: { instant_id: "string?", value: "string?", encoding: "string?" }, output: "instant + members[] (each with its local representation)" },
       { name: "validate", method: "POST", path: "/v1/validate", desc: "Validate a time value; returns warnings (POSIX-vs-UTC leap drift, out-of-range).", input: { value: "string", encoding: "unix_s|…", timescale: "utc|posix?" }, output: "valid + warnings + canonical_unix_ns" },
       { name: "transform-types", method: "GET", path: "/v1/transforms", desc: "Catalog of transform types (§12): identity, offset, linear_rate, piecewise, paused_clock (active-time), …", input: {}, output: "types + which are implemented" },
       { name: "version", method: "GET", path: "/v1/version", desc: "Versions, leap table, precision tiers (§35), trust tiers (§36), rate-limit policy (§38).", input: {}, output: "versions + tiers" },
@@ -515,6 +613,9 @@ function openapi(origin) {
       "/v1/systems/{id}": { get: { summary: "Get a system definition", responses: { 200: { description: "ok" }, 404: { description: "unknown system" } } } },
       "/v1/systems/{id}/now": { get: { summary: "Current time in a custom system", responses: { 200: { description: "ok" } } } },
       "/v1/path": { get: { summary: "Transform-graph route between two systems/timescales (§13-14)", responses: { 200: { description: "ok" }, 404: { description: "unknown node" } } } },
+      "/v1/temporal-groups": { get: { summary: "List Temporal Groups", responses: { 200: { description: "ok" } } }, post: { summary: "Create/update a Temporal Group", responses: { 200: { description: "ok" } } } },
+      "/v1/temporal-groups/{id}": { get: { summary: "Get a Temporal Group definition", responses: { 200: { description: "ok" }, 404: { description: "unknown group" } } } },
+      "/v1/temporal-groups/{id}/expand": { post: { summary: "One Instant, Many Systems: expand an instant across every group member", responses: { 200: { description: "ok" }, 404: { description: "unknown group/instant" } } } },
       "/v1/validate": { post: { summary: "Validate a time object (§41)", responses: { 200: { description: "ok" } } } },
       "/v1/transforms": { get: { summary: "Transform-type catalog (§12)", responses: { 200: { description: "ok" } } } },
       "/v1/transforms/{id}": { get: { summary: "A transform type's spec", responses: { 200: { description: "ok" }, 404: { description: "unknown" } } } },
@@ -613,6 +714,14 @@ export function CTCL(base = '${origin}') {
     systemNow:    async (id) => D(await j('/v1/systems/' + encodeURIComponent(id) + '/now')),
     listSystems:  async () => D(await j('/v1/systems')),
 
+    // ---- Temporal Groups: "One Instant, Many Systems" (CommonInstant Web §5.5) --
+    // members: "utc"|"posix"|"tai"|"gps"|"tz:<IANA>"|<system id>. expandGroup
+    // projects one instant across every member in a single call.
+    createGroup: async (def) => D(await post('/v1/temporal-groups', def)),
+    getGroup:    async (id) => D(await j('/v1/temporal-groups/' + encodeURIComponent(id))),
+    listGroups:  async () => D(await j('/v1/temporal-groups')),
+    expandGroup: async (id, opts = {}) => D(await post('/v1/temporal-groups/' + encodeURIComponent(id) + '/expand', opts)),
+
     // ---- §23 long-term memory: stamp an entry with verified instants ----------
     // Returns a record to STORE VERBATIM; separates event / write / recall time (§10.4).
     stampMemory: async (content, eventInstantId) => {
@@ -689,6 +798,13 @@ export default {
       const rest = decodeURIComponent(p.slice(12));
       if (rest.endsWith("/now")) return systemNow(rest.slice(0, -4), env);
       return getSystem(rest, env);
+    }
+    if (p === "/v1/temporal-groups" && request.method === "POST") return createGroup(request, env);
+    if (p === "/v1/temporal-groups" && request.method === "GET") return listGroups(env);
+    if (p.startsWith("/v1/temporal-groups/")) {
+      const rest = decodeURIComponent(p.slice(20));
+      if (rest.endsWith("/expand")) return expandGroup(rest.slice(0, -7), request, env);
+      return getGroup(rest, env);
     }
     if (p === "/v1/path") return transformPath(url, env);
     if (p === "/v1/validate" && request.method === "POST") return validateTime(request);
@@ -902,6 +1018,7 @@ footer a{color:var(--dim)}
    <div class="ep"><span class="m">GET</span><span class="path">/v1/instant/{id}</span><span class="d" data-zh="取回別的 agent 登記的同一瞬間">retrieve the exact instant another agent registered</span></div>
    <div class="ep"><span class="m">POST</span><span class="path">/v1/systems</span><span class="d" data-zh="建立持久自定義世界時鐘">persist a custom world clock</span></div>
    <div class="ep"><span class="m">GET</span><span class="path">/v1/systems/{id}/now</span><span class="d" data-zh="該世界當前時間＋世界曆">current time in that world + world calendar</span></div>
+   <div class="ep"><span class="m">POST</span><span class="path">/v1/temporal-groups/{id}/expand</span><span class="d" data-zh="一瞬間展開到群組內每個系統（Web 旗艦功能）">project one instant across every system in a group (flagship Web feature)</span></div>
    <div class="ep"><span class="m">GET</span><span class="path">/ai/ctcl.json</span><span class="d" data-zh="agent 工具宣告 —— 先讀這個">agent tool declaration — read this first</span></div>
   </div>
  </section>
@@ -930,6 +1047,15 @@ curl -s ${origin}/v1/instant/ctcl:instant:…</pre>
    <button class="btn pri" id="pgo" data-zh="轉換 →">convert →</button>
   </div>
   <pre id="pout">…</pre>
+ </section>
+
+ <section>
+  <div class="label" data-zh="一瞬間，多世界">One Instant, Many Systems</div>
+  <p data-zh="CTCL 的核心示範：同一個共同瞬間，同時投影到不同的時間系統 —— 不同時區、不同時標，未來也包含你自己登記的自定義世界時鐘。">CTCL's core demonstration: the same common instant, projected into several temporal systems at once — timezones, timescales, and (soon) any custom world clock you register.</p>
+  <div class="pg">
+   <button class="btn pri" id="ggo" data-zh="展開此刻 →">expand this instant →</button>
+  </div>
+  <pre id="gout">…</pre>
  </section>
 
  <footer>
@@ -1006,5 +1132,14 @@ tick();setInterval(tick,2000);requestAnimationFrame(frame);
 async function tryConvert(){var body={input:{value:$('pv').value,encoding:'unix_s'},output:{encoding:'rfc3339',timezone:$('ptz').value}};
  try{var r=await(await fetch(O+'/v1/convert',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();$('pout').textContent=JSON.stringify(r.ok?r.data:r,null,2)}catch(e){$('pout').textContent=String(e)}}
 $('pgo').addEventListener('click',tryConvert);
+// one instant, many systems
+async function tryExpand(){var gid='demo:one-instant-many-systems';
+ var members=['utc','posix','tai','gps','tz:Asia/Taipei','tz:America/New_York','tz:Europe/London'];
+ try{
+  await fetch(O+'/v1/temporal-groups',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:gid,members:members})});
+  var r=await(await fetch(O+'/v1/temporal-groups/'+encodeURIComponent(gid)+'/expand',{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).json();
+  $('gout').textContent=JSON.stringify(r.ok?r.data:r,null,2);
+ }catch(e){$('gout').textContent=String(e)}}
+$('ggo').addEventListener('click',tryExpand);
 </script></body></html>`;
 }

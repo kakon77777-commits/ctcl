@@ -31,6 +31,10 @@ await t.getInstant(i.id);
 const m = await t.stampMemory('remember this moment');  // event / write instants
 await t.lifeHistory('myAgent', originUnixS, pauses);     // paused clock = life-history
 await t.lifeNow('myAgent');                              // active_elapsed = experienced time
+
+// One Instant, Many Systems — project one instant across a group of systems at once
+await t.createGroup({ id: 'group:demo', members: ['utc', 'tz:Asia/Taipei', 'tz:America/New_York'] });
+await t.expandGroup('group:demo');                       // -> { instant, members: [{member, value, ...}] }
 ```
 
 Agents discover the whole API from **`/ai/ctcl.json`** (machine tool declaration) — read
@@ -44,8 +48,9 @@ that first.
 | `POST /v1/convert` | cross encoding / timescale / timezone; BigInt-nanosecond precision-preserving; DST ambiguity (§18) |
 | `POST /v1/transform` | map a parent time into a custom linear-rate world clock |
 | `POST /v1/instants` · `GET /v1/instant/{id}` | register / retrieve a shared instant I\* (multi-agent alignment) |
-| `POST /v1/systems` · `GET /v1/systems` · `/{id}` · `/{id}/now` | persistent custom systems — `rate.type` = constant \| piecewise \| **paused** (active-time) |
+| `POST /v1/systems` · `GET /v1/systems` · `/{id}` · `/{id}/now` | persistent custom systems — `rate.type` = constant \| piecewise \| **paused** (active-time) \| table |
 | `GET /v1/path` | transform-graph route between systems/timescales |
+| `POST /v1/temporal-groups` · `GET /v1/temporal-groups` · `/{id}` · `POST /{id}/expand` | **Temporal Groups** — "One Instant, Many Systems": project one instant across every member (builtin timescale \| `tz:<IANA>` \| custom system id) in a single call |
 | `POST /v1/validate` | validate a time object |
 | `GET /v1/transforms(/{id})` | transform-type catalog (§12) |
 | `GET /v1/timescales` · `GET /v1/encodings` · `GET /v1/version` | supported timescales / encodings / versions + precision & trust tiers |
@@ -74,12 +79,26 @@ Google Fonts on the page. State (the instant + system registries) lives in the
 
 Driving whitepapers in [`docs/`](docs/):
 - `共同時間座標層與異質時空間轉換_v0.1.md` — theory
-- `CTCL_Agent_Time_API_技術白皮書_v0.1.md` — API / protocol (57 §)
+- `CTCL_Agent_Time_API_技術白皮書_v0.1.md` — API / protocol (57 §), the original MVP driver
+- `CTCL_CommonInstant_Web_網站協議入口技術白皮書_v0.1.md` — this website's own product
+  whitepaper: public protocol gateway, reference surface, developer playground
+- `CTCL_Temporal_Port_App_通用時間端口技術白皮書_v0.1.md` — a separate, not-yet-started
+  installable desktop app (Rust core, local gateway, device clock observer) — future work
 
-v0.1 status (~80–85%): the §40 endpoint map is complete (13/13), MVP §50 complete,
-multi-agent alignment, active-time / life-history, precision-preserving convert, DST
-ambiguity, and the client SDK are all live. Remaining: `table_lookup` / `custom_expression`
-transforms; enforcement layers (signed metadata, rate limits, trust elevation); offline
-mode; simulation / robotics / digital-twin adapters; full leap-aware TAI/GPS conversion.
+v0.1 (Agent Time API) status (~80–85%): the §40 endpoint map is complete (13/13), MVP §50
+complete, multi-agent alignment, active-time / life-history, precision-preserving convert,
+DST ambiguity, and the client SDK are all live. Remaining: `custom_expression` transform
+(intentionally unimplemented — arbitrary-expression eval is a security risk); enforcement
+layers (signed metadata beyond `/v1/now`, hard rate limits via Durable Object, trust
+elevation); offline mode; simulation / robotics / digital-twin adapters; full leap-aware
+TAI/GPS conversion.
+
+CommonInstant Web whitepaper progress: P0 (schema/versioning/error-model stabilization) was
+already satisfied by the API whitepaper work above. **P1 — Temporal Groups ("One Instant,
+Many Systems") shipped 2026-07-11**: `POST/GET /v1/temporal-groups`, `GET /{id}`,
+`POST /{id}/expand` project one instant across every member of a named group in one call;
+homepage has a live demo. Remaining Web-whitepaper priorities: P2 Boundary Inspector, P3
+persisted-group polish, P4 Share Instant (`/i/<id>`), P5 semantic resolution
+(`resolve_temporal_context`), P6 constraint planner (`plan_shared_instant`).
 
 Migrated out of the `unbounded-axiom` repo into this standalone project on 2026-07-11.
