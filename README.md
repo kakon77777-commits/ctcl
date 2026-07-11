@@ -58,7 +58,9 @@ that first.
 | `GET /v1/transforms(/{id})` | transform-type catalog (§12) |
 | `GET /v1/timescales` · `GET /v1/encodings` · `GET /v1/version` | supported timescales / encodings / versions + precision & trust tiers |
 | `GET /sdk.js` · `GET /openapi.json` · `GET /ai/ctcl.json` | JS SDK · OpenAPI · agent tool declaration |
-| `GET /` | human page: live reference instant + drift, settings (language / theme / experimental Spacetime) |
+| `GET /` | human page: live reference instant + drift, settings (language / theme / experimental Spacetime), quick-task nav |
+| `GET /developers` | **Developer Console** — interfaces, error-code reference, version policy, changelog |
+| `GET /status` | **Status & Trust Panel** — live binding health (KV/rate-limiter/signing) + an honest known-limitations list |
 
 **Honesty (§16):** the edge wall clock is millisecond-grade — the `ns`/`us` fields are
 format-padding, and `quality.precision` + `estimated_uncertainty_ns` say so. `/v1/convert`
@@ -129,5 +131,13 @@ caveat) versus explicitly declared unimplemented (`gpu_availability`, `simulatio
 the CommonInstant Web whitepaper** (P0/P3 were already satisfied by earlier work — P3
 "persist commonly-used systems as a versioned resource" is exactly what the P1 Temporal
 Groups implementation already does).
+
+**Remaining §5/§10 site polish shipped 2026-07-11**: `GET /status` (§10.3 Trust Panel —
+live KV/rate-limiter/signing health via an extended `/v1/version`, plus an honest
+known-limitations list) and `GET /developers` (§5.7 Developer Console — interfaces
+including honestly-unimplemented MCP/CLI/webhook, a full error-code reference table,
+version policy, changelog). The homepage also gained the whitepaper's Appendix A
+quick-task nav (Create Instant / Convert / Expand Group / Inspect Boundary / Create
+Group / Developer Console) as anchor links into existing sections.
 
 Migrated out of the `unbounded-axiom` repo into this standalone project on 2026-07-11.

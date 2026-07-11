@@ -289,8 +289,33 @@ async function systemNow(id, env) {
 
 // ---- §17/§35/§36 version + tiers ; §18 local-time ambiguity ----------------
 
-function versionInfo() {
-  return ok({
+// §10.3 Trust/Status Panel runtime health — a live binding check, not a static claim.
+async function runtimeHealth(env) {
+  let kv = "unbound";
+  if (env && env.CTCL_KV) {
+    try { await env.CTCL_KV.get("status:healthcheck"); kv = "healthy"; }
+    catch (e) { kv = "error: " + String((e && e.message) || e); }
+  }
+  const rateLimit = (env && env.API_RL) ? "enforced" : "unbound (rate limiting disabled)";
+  const signKey = await getSignKey(env);
+  return {
+    instant_registry_kv: kv,
+    rate_limiter: rateLimit,
+    instant_signing: signKey ? `enabled (Ed25519, key_id ${KEY_ID})` : "disabled (CTCL_SIGN_KEY unset)",
+    edge_wall_clock: "operational",
+  };
+}
+const KNOWN_LIMITATIONS = [
+  "custom_expression transform intentionally NOT implemented — arbitrary-expression eval is a security risk",
+  "TAI/GPS timescales are a flat +37s/+18s approximation, not a live leap-second table",
+  "rate limiting is per-colo approximate (Cloudflare's native limiter design), not a hard global per-key guarantee — that would need a Durable Object",
+  "signing (§31) covers /v1/now only; registered instants (/v1/instants) are not yet signed",
+  "offline mode (§39) and monotonic/rollback checks (§32/§33) are not implemented",
+  "gpu_availability and simulation_state planner constraints require an external data feed this deployment does not have",
+  "no CLI or webhook relay yet — REST, SDK, and the web playground are the only interfaces today",
+];
+function versionInfo(env) {
+  return runtimeHealth(env).then((runtime) => ok({
     service: "CTCL", api_version: API_VERSION, release: "0.1",
     leap_table: LEAP, tzdb: "IANA via the runtime Intl database",
     source_precision: "millisecond_representation (edge wall clock)",
@@ -299,7 +324,8 @@ function versionInfo() {
     current_trust_tier: "T2",
     rate_limit_policy: { enforced: true, mechanism: "cloudflare-workers-ratelimit (approximate per CF design)", anonymous_per_min: 120, scope: "/v1/* per IP", note: "§38; every /v1/* call passes the native limiter (429 on reject) + edge/DDoS protection. Hard per-key guarantees would use a Durable Object. Contact licensing for higher tiers." },
     honesty: "precision is not accuracy; ns/us fields are format-padding on a millisecond source (§16).",
-  }, {}, "public, max-age=300");
+    runtime, known_limitations: KNOWN_LIMITATIONS,
+  }, {}, "no-store"));
 }
 
 // Resolve a NAIVE local datetime (no offset) in an IANA tz to candidate UTC instants.
@@ -656,6 +682,106 @@ $('copyJson').addEventListener('click',async function(){var t=await(await fetch(
 </script>
 </body></html>`;
 }
+// ---- Status/Trust Panel (§10.3) + Developer Console (§5.7) ----------------
+// Both are thin HTML pages: no new data model, just fetching/presenting what already
+// exists (GET /v1/version's runtime health block; the error codes and endpoints already
+// wired elsewhere). Reuses shareStyles() for visual consistency with /i/{id}.
+function siteNav(active) {
+  const items = [["/", "Home"], ["/developers", "Developers"], ["/status", "Status"]];
+  return items.map(([href, label]) => `<a href="${href}"${href === active ? ' style="color:var(--ink);font-weight:600"' : ""}>${label}</a>`).join(" &middot; ");
+}
+const ERROR_CODES = [
+  ["INVALID_TIME_VALUE", 400, "malformed, missing, or out-of-range input value"],
+  ["UNKNOWN_ENCODING", 400, "encoding not recognized (unix_s|unix_ms|unix_us|unix_ns|rfc3339)"],
+  ["INVALID_TIMEZONE", 400, "not a valid IANA timezone name"],
+  ["NONEXISTENT_LOCAL_TIME", 400, "DST spring-forward gap — this local time never occurred"],
+  ["AMBIGUOUS_LOCAL_TIME", 400, "DST fall-back overlap — this local time occurred twice"],
+  ["UNSUPPORTED_POLICY", 400, "invalid rate/system policy in a custom system definition"],
+  ["UNKNOWN_SYSTEM", 404, "no such custom system id"],
+  ["UNKNOWN_GROUP", 404, "no such Temporal Group id"],
+  ["UNKNOWN_INSTANT", 404, "no such registered instant id"],
+  ["UNKNOWN_TRANSFORM", 404, "no such transform type id"],
+  ["REGISTRY_UNAVAILABLE", 503, "CTCL_KV not bound on this deployment"],
+  ["SIGNING_DISABLED", 503, "no Ed25519 signing key configured (CTCL_SIGN_KEY unset)"],
+  ["RATE_LIMITED", 429, "over 120 requests/min for this IP on /v1/*"],
+  ["NOT_FOUND", 404, "unknown route"],
+];
+function statusPage() {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CTCL · Status</title>
+<meta name="description" content="CTCL live status: component health, versions, and an honest list of known limitations.">
+<style>${shareStyles()}</style></head><body><div class="wrap">
+<div class="eyebrow">CTCL &middot; Status</div>
+<h1>Status &amp; Trust Panel</h1>
+<p style="color:var(--dim)">Live component health, versions, and an honest list of known limitations (§10.3) — not a marketing status page.</p>
+<nav style="margin:1rem 0 1.6rem;font:600 .8rem/1 var(--mono)">${siteNav("/status")}</nav>
+<div class="card"><div id="rows">loading…</div></div>
+<h2 style="font-size:1.05rem;margin-top:1.6rem">Known limitations</h2>
+<div class="card"><div id="limits">loading…</div></div>
+<div class="actions"><a class="btn" href="/v1/version">raw JSON</a> <a class="btn" href="/ai/ctcl.json">agent tool declaration</a></div>
+<footer>CTCL v0.1 &middot; a reference + transformation layer, not a timing authority. <a href="/">&larr; home</a></footer>
+</div>
+<script>
+(async function(){
+ try{
+  var r=await(await fetch('/v1/version')).json();var d=r.data;var rt=d.runtime||{};
+  var rows=[['service',d.service+' '+d.release],['api_version',d.api_version],['current_trust_tier',d.current_trust_tier],
+    ['instant_registry_kv',rt.instant_registry_kv],['rate_limiter',rt.rate_limiter],['instant_signing',rt.instant_signing],
+    ['edge_wall_clock',rt.edge_wall_clock],['tzdb',d.tzdb],['leap_table_as_of',d.leap_table&&d.leap_table.as_of]];
+  document.getElementById('rows').innerHTML=rows.map(function(x){return '<div class="row"><span class="k">'+x[0]+'</span><span class="v">'+(x[1]||'—')+'</span></div>'}).join('');
+  document.getElementById('limits').innerHTML=(d.known_limitations||[]).map(function(l){return '<div class="row"><span class="v" style="text-align:left;color:var(--ink)">'+l+'</span></div>'}).join('');
+ }catch(e){document.getElementById('rows').textContent='(failed to load /v1/version: '+e+')'}
+})();
+</script>
+</body></html>`;
+}
+function developerConsolePage() {
+  const errRows = ERROR_CODES.map(([code, status, desc]) =>
+    `<div class="row"><span class="k">${code}</span><span class="v">${status}</span></div><div class="row" style="border-top:0;padding-top:0"><span class="v" style="text-align:left;color:var(--faint);font-size:.76rem">${desc}</span></div>`).join("");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CTCL · Developers</title>
+<meta name="description" content="CTCL developer console: OpenAPI, SDK, error codes, changelog, version policy.">
+<style>${shareStyles()}</style></head><body><div class="wrap">
+<div class="eyebrow">CTCL &middot; Developers</div>
+<h1>Developer Console</h1>
+<p style="color:var(--dim)">Everything a client implementer needs in one place (§5.7).</p>
+<nav style="margin:1rem 0 1.6rem;font:600 .8rem/1 var(--mono)">${siteNav("/developers")}</nav>
+
+<h2 style="font-size:1.05rem">Interfaces</h2>
+<div class="card">
+ <div class="row"><span class="k">REST + OpenAPI</span><span class="v"><a href="/openapi.json">/openapi.json</a></span></div>
+ <div class="row"><span class="k">Agent tool declaration</span><span class="v"><a href="/ai/ctcl.json">/ai/ctcl.json</a></span></div>
+ <div class="row"><span class="k">JS SDK (ESM)</span><span class="v"><a href="/sdk.js">/sdk.js</a></span></div>
+ <div class="row"><span class="k">MCP adapter</span><span class="v">not yet implemented — §9 treats MCP as an adapter over this same REST core, not the core itself; discovery today is via the tool declaration above</span></div>
+ <div class="row"><span class="k">CLI</span><span class="v">not yet implemented — curl/SDK are the current interfaces</span></div>
+ <div class="row"><span class="k">Webhook relay</span><span class="v">not yet implemented</span></div>
+</div>
+
+<h2 style="font-size:1.05rem;margin-top:1.6rem">Error codes</h2>
+<div class="card">${errRows}</div>
+
+<h2 style="font-size:1.05rem;margin-top:1.6rem">Version policy</h2>
+<div class="card">
+ <p style="margin:0;color:var(--ink)">All routes here are <code>v1</code>. The response envelope shape
+ (<code>{ok, data, meta}</code> / <code>{ok:false, error, meta}</code>) will not change within v1 — new
+ optional fields may be added, but existing fields won't be removed or repurposed. A breaking change would
+ ship as <code>/v2</code>, not a silent mutation of <code>/v1</code>.</p>
+</div>
+
+<h2 style="font-size:1.05rem;margin-top:1.6rem">Changelog</h2>
+<div class="card">
+ <div class="row"><span class="k">2026-07-11</span><span class="v">Constraint Planner, Semantic Resolution, Share Instant, Boundary Inspector, Temporal Groups — CommonInstant Web whitepaper P1–P6</span></div>
+ <div class="row"><span class="k">2026-07-11</span><span class="v">Ed25519-signed instants (§31), native rate limiting (§38), table_lookup transform</span></div>
+ <div class="row"><span class="k">2026-07-11</span><span class="v">Migrated to standalone repo (from unbounded-axiom)</span></div>
+ <div class="row"><span class="k">2026-07-10</span><span class="v">v0.1 MVP: reference instant, convert, transform, agent tool declaration</span></div>
+</div>
+
+<div class="actions"><a class="btn" href="/v1/version">raw version JSON</a></div>
+<footer>CTCL v0.1 &middot; a reference + transformation layer, not a timing authority. <a href="/">&larr; home</a></footer>
+</div>
+</body></html>`;
+}
+
 async function instantSharePage(origin, rawId, env) {
   const headers = { "Content-Type": "text/html; charset=utf-8", ...CORS };
   if (!env || !env.CTCL_KV) return new Response(shareNotFound(origin, rawId, "Registry not configured on this deployment."), { status: 503, headers });
@@ -1147,7 +1273,7 @@ export default {
     }
 
     if (p === "/v1/now") return ok(await signInstant(env, nowEnvelope()), { server_observed_at: new Date().toISOString() }, "no-store");
-    if (p === "/v1/version") return versionInfo();
+    if (p === "/v1/version") return versionInfo(env);
     if (p === "/v1/pubkey") { const pk = await pubKeyInfo(env); return pk ? ok(pk, {}, "public, max-age=3600") : fail("SIGNING_DISABLED", "no signing key configured (CTCL_SIGN_KEY unset)", {}, 503); }
     if (p === "/v1/timescales") return ok({ timescales: [
       { id: "utc", type: "reference", note: "Civil reference; includes leap seconds." },
@@ -1182,6 +1308,8 @@ export default {
     if (p === "/v1/planner/constraint-types") return constraintTypesCatalog();
     if (p === "/i") return Response.redirect(origin + "/", 302);
     if (p.startsWith("/i/")) return instantSharePage(origin, decodeURIComponent(p.slice(3)), env);
+    if (p === "/status") return new Response(statusPage(), { headers: { "Content-Type": "text/html; charset=utf-8", ...CORS } });
+    if (p === "/developers") return new Response(developerConsolePage(), { headers: { "Content-Type": "text/html; charset=utf-8", ...CORS } });
     if (p === "/v1/path") return transformPath(url, env);
     if (p === "/v1/validate" && request.method === "POST") return validateTime(request);
     if (p === "/v1/transforms") return transformsCatalog(null);
@@ -1236,6 +1364,9 @@ h1{font-size:clamp(2.1rem,6vw,3.4rem);font-weight:680;margin:.7rem 0 .5rem}
 h1 em{font-style:italic;color:var(--gold)}
 .lede{color:var(--dim);font-size:1.06rem;max-width:44ch;margin:.6rem 0 1.4rem}
 .cta{display:flex;gap:.6rem;flex-wrap:wrap}
+.tasknav{display:flex;gap:.5rem 1rem;flex-wrap:wrap;margin-top:1.1rem;font:500 .74rem/1.4 var(--mono)}
+.tasknav a{color:var(--faint);text-decoration:none;border-bottom:1px dotted var(--line2);transition:color .15s,border-color .15s}
+.tasknav a:hover{color:var(--gold);border-color:var(--gold)}
 .btn{font:600 .9rem/1 var(--sans);border-radius:.5rem;padding:.7rem 1.1rem;cursor:pointer;border:1px solid var(--line2);transition:transform .12s,background .2s,color .2s,border-color .2s;text-decoration:none;display:inline-flex;align-items:center;gap:.45rem}
 .btn.pri{background:var(--gold);color:#1a1408;border-color:var(--gold)}
 .btn.pri:hover{background:var(--gold2)}
@@ -1353,11 +1484,19 @@ footer a{color:var(--dim)}
    <div class="eyebrow" data-zh="EveMissLab · Agent 時間基礎設施">EveMissLab · Agent time infrastructure</div>
    <h1 data-zh="一個<em>共同瞬間</em>，各自的時間世界。">One <em>shared instant</em>, every local time.</h1>
    <p class="lede" data-zh="CTCL 給異質的 agent、模擬器與持續存在的 AI 一個驗證過的共同參考瞬間 —— 不用共用時鐘、曆法或 epoch。同一瞬間，不同表示。">CTCL gives heterogeneous agents, simulators and persistent AI a verified common reference instant — without sharing a clock, calendar, or epoch. Same instant, different representations.</p>
-   <div class="cta">
+   <div class="cta" id="hero-cta">
     <a class="btn pri" href="/v1/now" target="_blank" rel="noopener" data-zh="取得驗證瞬間 →">Get a verified instant →</a>
     <button class="btn sec" id="shareBtn" data-zh="分享此刻 →">Share this instant →</button>
     <a class="btn sec" href="/ai/ctcl.json" data-zh="Agent 工具宣告">Agent tool declaration</a>
    </div>
+   <nav class="tasknav" aria-label="Quick tasks">
+    <a href="#hero-cta" data-zh="建立共同瞬間">Create a Common Instant</a>
+    <a href="#convert" data-zh="轉換時間戳">Convert a Timestamp</a>
+    <a href="#groups" data-zh="一瞬展開多系統">Expand One Instant Across Systems</a>
+    <a href="#boundary" data-zh="檢查時間邊界">Inspect a Temporal Boundary</a>
+    <a href="#groups" data-zh="建立時間群組">Create a Temporal Group</a>
+    <a href="/developers" data-zh="開發者主控台">Open Developer Console</a>
+   </nav>
   </div>
   <div class="instant" role="group" aria-label="Live reference instant">
    <svg class="clockface" viewBox="0 0 100 100" aria-hidden="true">
@@ -1419,7 +1558,7 @@ curl -s ${origin}/v1/instant/ctcl:instant:…</pre>
 }'</pre>
  </section>
 
- <section>
+ <section id="convert">
   <div class="label">Playground</div>
   <p data-zh="把一個 Unix 秒值轉成某時區的 RFC3339。">Convert a Unix-seconds value into an RFC3339 timestamp for a timezone.</p>
   <div class="pg">
@@ -1430,7 +1569,7 @@ curl -s ${origin}/v1/instant/ctcl:instant:…</pre>
   <pre id="pout">…</pre>
  </section>
 
- <section>
+ <section id="groups">
   <div class="label" data-zh="一瞬間，多世界">One Instant, Many Systems</div>
   <p data-zh="CTCL 的核心示範：同一個共同瞬間，同時投影到不同的時間系統 —— 不同時區、不同時標，未來也包含你自己登記的自定義世界時鐘。">CTCL's core demonstration: the same common instant, projected into several temporal systems at once — timezones, timescales, and (soon) any custom world clock you register.</p>
   <div class="pg">
@@ -1439,7 +1578,7 @@ curl -s ${origin}/v1/instant/ctcl:instant:…</pre>
   <pre id="gout">…</pre>
  </section>
 
- <section>
+ <section id="boundary">
   <div class="label" data-zh="邊界檢查器">Boundary Inspector</div>
   <p data-zh="主動檢查一個地方時間是否安全 —— DST gap（不存在）、fold（模糊）或正常。與 /v1/convert 不同，這裡從不報錯，永遠回傳一個狀態。下面預設是 2026 年美東的春令跳時（不存在的 02:30）。">Proactively check whether a local time is safe — DST gap (nonexistent), fold (ambiguous), or normal. Unlike /v1/convert, this never errors — it always returns a status. The default below is 2026's US Eastern spring-forward gap (02:30 doesn't exist).</p>
   <div class="pg">
@@ -1471,7 +1610,7 @@ curl -s ${origin}/v1/instant/ctcl:instant:…</pre>
 
  <footer>
   <span data-zh="CTCL v0.1 · 參考＋轉換層，不是授時機構。">CTCL v0.1 · a reference + transformation layer, not a timing authority.</span><br>
-  <a href="/sdk.js">JS SDK</a> · <a href="/openapi.json">OpenAPI</a> · <a href="/ai/ctcl.json">tool declaration</a> · <a href="/v1/version">version</a> · Neo.K / 一言諾科技有限公司 · EveMissLab
+  <a href="/sdk.js">JS SDK</a> · <a href="/openapi.json">OpenAPI</a> · <a href="/ai/ctcl.json">tool declaration</a> · <a href="/developers">developers</a> · <a href="/status">status</a> · Neo.K / 一言諾科技有限公司 · EveMissLab
  </footer>
 </div>
 
