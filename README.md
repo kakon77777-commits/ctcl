@@ -52,6 +52,7 @@ that first.
 | `GET /v1/path` | transform-graph route between systems/timescales |
 | `POST /v1/temporal-groups` · `GET /v1/temporal-groups` · `/{id}` · `POST /{id}/expand` | **Temporal Groups** — "One Instant, Many Systems": project one instant across every member (builtin timescale \| `tz:<IANA>` \| custom system id) in a single call |
 | `POST /v1/boundaries/inspect` | **Boundary Inspector** — proactive gap/fold/pause/rate_change status check + upcoming DST transitions; never errors, unlike `/v1/convert` |
+| `POST /v1/resolve` | **Semantic Resolution** — `resolve_temporal_context`: ambiguous input (city, alias, tz abbreviation) → IANA candidates + confidence; never silently disambiguates |
 | `POST /v1/validate` | validate a time object |
 | `GET /v1/transforms(/{id})` | transform-type catalog (§12) |
 | `GET /v1/timescales` · `GET /v1/encodings` · `GET /v1/version` | supported timescales / encodings / versions + precision & trust tiers |
@@ -108,8 +109,14 @@ to `GET /v1/instant/{id}` — instant details, a live "project into your timezon
 form, copy-link/copy-JSON, and a raw-JSON-API link; `POST /v1/instants` now also returns a
 `share` URL; homepage has a "Share this instant" button. User-controlled content (the
 `label` field, the URL id itself) is HTML-escaped before rendering — verified against both
-stored and reflected XSS. Remaining Web-whitepaper priorities: P3 persisted-group polish,
-P5 semantic resolution (`resolve_temporal_context`), P6 constraint planner
-(`plan_shared_instant`).
+stored and reflected XSS. **P5 — Semantic Resolution shipped 2026-07-11**:
+`POST /v1/resolve` (`resolve_temporal_context`) maps a city name / common alias / tz
+abbreviation to IANA candidates with confidence, via a compact built-in table (~25
+places) plus exact-IANA-id and fuzzy-substring fallbacks. Deliberately scoped: genuinely
+ambiguous input (e.g. `"CST"` → US Central *or* China Standard) returns both candidates
+at reduced confidence instead of picking one, and free-form natural-language phrases
+(`"tomorrow 3pm"`) return an honest empty result rather than a guess — consistent with
+§6.3 ("don't silently resolve ambiguity"). Remaining Web-whitepaper priorities: P3
+persisted-group polish, P6 constraint planner (`plan_shared_instant`).
 
 Migrated out of the `unbounded-axiom` repo into this standalone project on 2026-07-11.

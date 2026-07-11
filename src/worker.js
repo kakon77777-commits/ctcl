@@ -665,6 +665,65 @@ async function instantSharePage(origin, rawId, env) {
   return new Response(sharePage(origin, rec, instantViews(BigInt(rec.unix_ns))), { headers });
 }
 
+// ---- Semantic Resolution (P5 — CommonInstant Web whitepaper §6/§8.1) ------
+// resolve_temporal_context: map an ambiguous human input (city name, common alias,
+// timezone abbreviation) to IANA candidates with confidence — NEVER silently pick one
+// (§6.3). Free-form natural-language time phrases ("tomorrow 3pm", "before London
+// market open") are explicitly OUT OF SCOPE for v1: an honest empty result beats a
+// guess that's wrong half the time.
+const TZ_ALIASES = {
+  "taipei": ["Asia/Taipei"], "台北": ["Asia/Taipei"], "taiwan": ["Asia/Taipei"], "台灣": ["Asia/Taipei"], "台灣時間": ["Asia/Taipei"],
+  "tokyo": ["Asia/Tokyo"], "東京": ["Asia/Tokyo"], "japan": ["Asia/Tokyo"], "日本": ["Asia/Tokyo"],
+  "london": ["Europe/London"], "uk": ["Europe/London"], "britain": ["Europe/London"],
+  "new york": ["America/New_York"], "nyc": ["America/New_York"],
+  "los angeles": ["America/Los_Angeles"], "la": ["America/Los_Angeles"],
+  "beijing": ["Asia/Shanghai"], "china": ["Asia/Shanghai"], "北京": ["Asia/Shanghai"], "中國": ["Asia/Shanghai"],
+  "hong kong": ["Asia/Hong_Kong"], "香港": ["Asia/Hong_Kong"],
+  "singapore": ["Asia/Singapore"], "新加坡": ["Asia/Singapore"],
+  "seoul": ["Asia/Seoul"], "korea": ["Asia/Seoul"], "首爾": ["Asia/Seoul"], "韓國": ["Asia/Seoul"],
+  "sydney": ["Australia/Sydney"], "paris": ["Europe/Paris"], "berlin": ["Europe/Berlin"],
+  "moscow": ["Europe/Moscow"], "dubai": ["Asia/Dubai"], "mumbai": ["Asia/Kolkata"], "india": ["Asia/Kolkata"],
+  // genuinely ambiguous abbreviations resolve to MULTIPLE candidates, lower confidence
+  "cst": ["America/Chicago", "Asia/Shanghai"], "est": ["America/New_York"], "edt": ["America/New_York"],
+  "pst": ["America/Los_Angeles"], "pdt": ["America/Los_Angeles"], "jst": ["Asia/Tokyo"], "kst": ["Asia/Seoul"],
+  "ist": ["Asia/Kolkata"], "tpe": ["Asia/Taipei"], "nrt": ["Asia/Tokyo"], "lhr": ["Europe/London"], "jfk": ["America/New_York"],
+};
+
+function resolveTemporalContext(input) {
+  const raw = String(input || "").trim();
+  const key = raw.toLowerCase();
+  const out = [];
+  if (TZ_ALIASES[key]) {
+    const list = TZ_ALIASES[key];
+    const conf = list.length === 1 ? 0.95 : Math.round((0.9 / list.length) * 100) / 100;
+    for (const tz of list) out.push({ context_id: "iana:" + tz, confidence: conf, source: "ctcl_alias_table",
+      note: list.length > 1 ? "multiple plausible zones share this label — genuinely ambiguous, not resolved for you" : undefined });
+  }
+  if (!out.length && /^[A-Za-z_]+\/[A-Za-z_]+$/.test(raw)) {
+    try { tzOffsetMinutes(Date.now(), raw); out.push({ context_id: "iana:" + raw, confidence: 0.99, source: "iana_tzdb_exact" }); } catch { /* not a real IANA id */ }
+  }
+  if (!out.length) {
+    for (const [k, list] of Object.entries(TZ_ALIASES)) {
+      if (key.length > 2 && (k.includes(key) || key.includes(k))) {
+        for (const tz of list) if (!out.some((o) => o.context_id === "iana:" + tz)) out.push({ context_id: "iana:" + tz, confidence: 0.4, source: "ctcl_alias_table_fuzzy" });
+      }
+    }
+  }
+  return {
+    input: raw, candidates: out,
+    scope_note: out.length
+      ? "Place-name / abbreviation -> IANA timezone resolution only (§6). Never silently disambiguate — check confidence and candidate count yourself."
+      : "No candidate found. v1 resolves place names, common city aliases, and known timezone abbreviations only. Free-form natural-language time phrases (\"tomorrow 3pm\", \"before London market open\") are explicitly out of scope — guessing at those would violate §6.3 (don't silently resolve ambiguity).",
+  };
+}
+
+async function handleResolve(req) {
+  let body;
+  try { body = await req.json(); } catch { return fail("INVALID_TIME_VALUE", "body must be JSON"); }
+  if (body.input == null) return fail("INVALID_TIME_VALUE", "input required (e.g. {input:'Taipei'})");
+  return ok(resolveTemporalContext(body.input));
+}
+
 // ---- endpoints -------------------------------------------------------------
 
 async function handleConvert(req) {
@@ -769,6 +828,8 @@ function toolDeclaration(origin) {
         input: { instant_id: "string?", value: "string?", encoding: "string?" }, output: "instant + members[] (each with its local representation)" },
       { name: "inspect-boundary", method: "POST", path: "/v1/boundaries/inspect", desc: "Proactive pre-flight check (§5.6): is this local time / custom-system state safe? Unlike /v1/convert, never errors — always returns a status: normal|gap|fold (timezone) or normal|pause|rate_change (system), plus upcoming DST transitions within a window.",
         input: { timezone: "IANA?", local_value: "naive local datetime string?", window_hours: "number? (default 48)" }, input_alt: { system_id: "string?", value: "string?", encoding: "string?" }, output: "status + safe + detail" },
+      { name: "resolve-temporal-context", method: "POST", path: "/v1/resolve", desc: "resolve_temporal_context (§6): map an ambiguous input (city name, common alias, tz abbreviation) to IANA timezone candidates with confidence. NEVER silently picks one when genuinely ambiguous (e.g. \"CST\"). Free-form natural-language time phrases are explicitly out of scope — honest empty result, not a guess.",
+        input: { input: "string (e.g. 'Taipei', '台北', 'CST', 'Asia/Tokyo')" }, output: "candidates[] (context_id, confidence, source) + scope_note" },
       { name: "validate", method: "POST", path: "/v1/validate", desc: "Validate a time value; returns warnings (POSIX-vs-UTC leap drift, out-of-range).", input: { value: "string", encoding: "unix_s|…", timescale: "utc|posix?" }, output: "valid + warnings + canonical_unix_ns" },
       { name: "transform-types", method: "GET", path: "/v1/transforms", desc: "Catalog of transform types (§12): identity, offset, linear_rate, piecewise, paused_clock (active-time), …", input: {}, output: "types + which are implemented" },
       { name: "version", method: "GET", path: "/v1/version", desc: "Versions, leap table, precision tiers (§35), trust tiers (§36), rate-limit policy (§38).", input: {}, output: "versions + tiers" },
@@ -804,6 +865,7 @@ function openapi(origin) {
       "/v1/temporal-groups/{id}": { get: { summary: "Get a Temporal Group definition", responses: { 200: { description: "ok" }, 404: { description: "unknown group" } } } },
       "/v1/temporal-groups/{id}/expand": { post: { summary: "One Instant, Many Systems: expand an instant across every group member", responses: { 200: { description: "ok" }, 404: { description: "unknown group/instant" } } } },
       "/v1/boundaries/inspect": { post: { summary: "Boundary Inspector (§5.6): proactive gap/fold/pause/rate_change status check", responses: { 200: { description: "ok" } } } },
+      "/v1/resolve": { post: { summary: "resolve_temporal_context (§6): ambiguous input -> IANA candidates with confidence", responses: { 200: { description: "ok" } } } },
       "/v1/validate": { post: { summary: "Validate a time object (§41)", responses: { 200: { description: "ok" } } } },
       "/v1/transforms": { get: { summary: "Transform-type catalog (§12)", responses: { 200: { description: "ok" } } } },
       "/v1/transforms/{id}": { get: { summary: "A transform type's spec", responses: { 200: { description: "ok" }, 404: { description: "unknown" } } } },
@@ -913,6 +975,9 @@ export function CTCL(base = '${origin}') {
     // ---- Boundary Inspector: proactive gap/fold/pause/rate_change check (§5.6) --
     inspectBoundary: async (input) => D(await post('/v1/boundaries/inspect', input)),
 
+    // ---- Semantic Resolution: ambiguous input -> IANA candidates (§6) -----------
+    resolveContext: async (input) => D(await post('/v1/resolve', { input })),
+
     // ---- §23 long-term memory: stamp an entry with verified instants ----------
     // Returns a record to STORE VERBATIM; separates event / write / recall time (§10.4).
     stampMemory: async (content, eventInstantId) => {
@@ -998,6 +1063,7 @@ export default {
       return getGroup(rest, env);
     }
     if (p === "/v1/boundaries/inspect" && request.method === "POST") return inspectBoundary(request, env);
+    if (p === "/v1/resolve" && request.method === "POST") return handleResolve(request);
     if (p === "/i") return Response.redirect(origin + "/", 302);
     if (p.startsWith("/i/")) return instantSharePage(origin, decodeURIComponent(p.slice(3)), env);
     if (p === "/v1/path") return transformPath(url, env);
@@ -1216,6 +1282,7 @@ footer a{color:var(--dim)}
    <div class="ep"><span class="m">POST</span><span class="path">/v1/temporal-groups/{id}/expand</span><span class="d" data-zh="一瞬間展開到群組內每個系統（Web 旗艦功能）">project one instant across every system in a group (flagship Web feature)</span></div>
    <div class="ep"><span class="m">POST</span><span class="path">/v1/boundaries/inspect</span><span class="d" data-zh="主動檢查 DST gap／fold／暫停／速率變化，從不報錯">proactive gap／fold／pause／rate-change check, never errors</span></div>
    <div class="ep"><span class="m">GET</span><span class="path">/i/{id}</span><span class="d" data-zh="人類可讀的分享頁 —— 任何人都能對齊到同一瞬間">human-readable share page — anyone can align on the same instant</span></div>
+   <div class="ep"><span class="m">POST</span><span class="path">/v1/resolve</span><span class="d" data-zh="模糊輸入 → IANA 候選＋信心值，從不武斷解析">ambiguous input → IANA candidates + confidence, never guesses</span></div>
    <div class="ep"><span class="m">GET</span><span class="path">/ai/ctcl.json</span><span class="d" data-zh="agent 工具宣告 —— 先讀這個">agent tool declaration — read this first</span></div>
   </div>
  </section>
@@ -1264,6 +1331,16 @@ curl -s ${origin}/v1/instant/ctcl:instant:…</pre>
    <button class="btn pri" id="bgo" data-zh="檢查 →">inspect →</button>
   </div>
   <pre id="bout">…</pre>
+ </section>
+
+ <section>
+  <div class="label" data-zh="語義解析">Semantic Resolution</div>
+  <p data-zh="「CST」指的是美國中部時間還是中國標準時間？CTCL 從不替你武斷決定 —— 回傳候選＋信心值，而不是一個猜測。">Does "CST" mean US Central Time or China Standard Time? CTCL never silently decides for you — it returns candidates with confidence, not a guess.</p>
+  <div class="pg">
+   <label class="mono" style="color:var(--faint);font-size:.75rem">input <input id="rv" value="CST" aria-label="Ambiguous place or timezone input"></label>
+   <button class="btn pri" id="rgo" data-zh="解析 →">resolve →</button>
+  </div>
+  <pre id="rout">…</pre>
  </section>
 
  <footer>
@@ -1353,6 +1430,10 @@ $('ggo').addEventListener('click',tryExpand);
 async function tryInspect(){var body={timezone:$('btz').value,local_value:$('bv').value};
  try{var r=await(await fetch(O+'/v1/boundaries/inspect',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();$('bout').textContent=JSON.stringify(r.ok?r.data:r,null,2)}catch(e){$('bout').textContent=String(e)}}
 $('bgo').addEventListener('click',tryInspect);
+// semantic resolution
+async function tryResolve(){var body={input:$('rv').value};
+ try{var r=await(await fetch(O+'/v1/resolve',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();$('rout').textContent=JSON.stringify(r.ok?r.data:r,null,2)}catch(e){$('rout').textContent=String(e)}}
+$('rgo').addEventListener('click',tryResolve);
 // share this instant — navigate (not window.open: popup blockers reject open() after an await)
 $('shareBtn').addEventListener('click',async function(){try{
  var r=await(await fetch(O+'/v1/instants',{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).json();
