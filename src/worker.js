@@ -488,6 +488,7 @@ function toolDeclaration(origin) {
       { name: "validate", method: "POST", path: "/v1/validate", desc: "Validate a time value; returns warnings (POSIX-vs-UTC leap drift, out-of-range).", input: { value: "string", encoding: "unix_s|…", timescale: "utc|posix?" }, output: "valid + warnings + canonical_unix_ns" },
       { name: "transform-types", method: "GET", path: "/v1/transforms", desc: "Catalog of transform types (§12): identity, offset, linear_rate, piecewise, paused_clock (active-time), …", input: {}, output: "types + which are implemented" },
       { name: "version", method: "GET", path: "/v1/version", desc: "Versions, leap table, precision tiers (§35), trust tiers (§36), rate-limit policy (§38).", input: {}, output: "versions + tiers" },
+      { name: "pubkey", method: "GET", path: "/v1/pubkey", desc: "Ed25519 public key (§31) — verify a /v1/now instant's signature is authentic (not forged). SDK: verifyInstant().", input: {}, output: "alg + key_id + public_jwk" },
     ],
     memory_contract: "For long-term memory: store instant_id + timescale + encoding + source_quality (do not store only a bare number). Distinguish event / write / recall instants (§10.4, §23).",
     not_a: ["universal clock authority", "timing/NTP replacement", "guaranteed ns-accurate global sync"],
@@ -521,6 +522,53 @@ function openapi(origin) {
   };
 }
 
+// ---- §31 authenticity: Ed25519-signed instants ----------------------------
+// The private key lives ONLY in the Cloudflare secret CTCL_SIGN_KEY (pkcs8 base64).
+// The Worker signs each /v1/now instant and derives + publishes the public key at
+// /v1/pubkey, so any agent can verify a timestamp really came from CTCL (not forged,
+// whitepaper §31). Graceful: no key configured -> no signature, /v1/pubkey 503.
+let _signKey; // undefined=untried, null=none, CryptoKey=ready
+let _pubInfo;
+const KEY_ID = "ctcl-ed25519-1";
+async function getSignKey(env) {
+  if (_signKey !== undefined) return _signKey;
+  _signKey = null;
+  try {
+    if (env && env.CTCL_SIGN_KEY) {
+      const der = Uint8Array.from(atob(env.CTCL_SIGN_KEY), (c) => c.charCodeAt(0));
+      _signKey = await crypto.subtle.importKey("pkcs8", der, { name: "Ed25519" }, true, ["sign"]);
+    }
+  } catch (e) { _signKey = null; }
+  return _signKey;
+}
+function signedString(inst) {
+  return inst.instant.id + "|" + inst.encodings.unix_ns + "|" + inst.instant.reference.timescale;
+}
+async function signInstant(env, inst) {
+  const key = await getSignKey(env);
+  if (!key) return inst;
+  try {
+    const sig = await crypto.subtle.sign({ name: "Ed25519" }, key, new TextEncoder().encode(signedString(inst)));
+    inst.signature = { alg: "Ed25519", key_id: KEY_ID, signed_fields: "instant_id|unix_ns|timescale",
+      value: btoa(String.fromCharCode(...new Uint8Array(sig))), verify: "/v1/pubkey" };
+  } catch (e) { /* signing is best-effort */ }
+  return inst;
+}
+async function pubKeyInfo(env) {
+  if (_pubInfo !== undefined) return _pubInfo;
+  _pubInfo = null;
+  const key = await getSignKey(env);
+  if (key) {
+    try {
+      const jwk = await crypto.subtle.exportKey("jwk", key); // private jwk; we expose ONLY x (public)
+      _pubInfo = { alg: "Ed25519", key_id: KEY_ID, public_jwk: { kty: "OKP", crv: "Ed25519", x: jwk.x },
+        signed_fields: "instant_id|unix_ns|timescale (UTF-8, joined by '|')",
+        verify_note: "import public_jwk as Ed25519, verify signature.value (base64) over the signed_fields string." };
+    } catch (e) { _pubInfo = null; }
+  }
+  return _pubInfo;
+}
+
 // ---- §23/§24/§26/§52 client SDK (served at /sdk.js) ------------------------
 // The reference client (§44-47) made real, plus memory + life-history + task helpers.
 // ESM: import { CTCL } from '<origin>/sdk.js'
@@ -545,6 +593,15 @@ export function CTCL(base = '${origin}') {
     convert:    async (input, output) => D(await post('/v1/convert', { input, output })),
     transform:  async (value, system, value_encoding = 'unix_s') => D(await post('/v1/transform', { value, value_encoding, system })),
     path:       async (from, to) => D(await j('/v1/path?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to))),
+    // §31 verify a signed instant against the published Ed25519 public key
+    verifyInstant: async (inst) => {
+      if (!inst || !inst.signature) return { verified: false, reason: 'no_signature' };
+      const pk = D(await j('/v1/pubkey'));
+      const key = await crypto.subtle.importKey('jwk', pk.public_jwk, { name: 'Ed25519' }, false, ['verify']);
+      const msg = new TextEncoder().encode(inst.instant.id + '|' + inst.encodings.unix_ns + '|' + inst.instant.reference.timescale);
+      const sig = Uint8Array.from(atob(inst.signature.value), (c) => c.charCodeAt(0));
+      return { verified: await crypto.subtle.verify({ name: 'Ed25519' }, key, sig, msg), key_id: pk.key_id };
+    },
 
     // shared reference instant — multi-agent alignment (§27). Store the id in memory,
     // never a bare number; any agent (or your next session) getInstant(id) aligns exactly.
@@ -598,8 +655,9 @@ export default {
     const origin = url.origin;
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
 
-    if (p === "/v1/now") return ok(nowEnvelope(), { server_observed_at: new Date().toISOString() }, "no-store");
+    if (p === "/v1/now") return ok(await signInstant(env, nowEnvelope()), { server_observed_at: new Date().toISOString() }, "no-store");
     if (p === "/v1/version") return versionInfo();
+    if (p === "/v1/pubkey") { const pk = await pubKeyInfo(env); return pk ? ok(pk, {}, "public, max-age=3600") : fail("SIGNING_DISABLED", "no signing key configured (CTCL_SIGN_KEY unset)", {}, 503); }
     if (p === "/v1/timescales") return ok({ timescales: [
       { id: "utc", type: "reference", note: "Civil reference; includes leap seconds." },
       { id: "posix", type: "encoding", note: "Unix time; POSIX ignores leap seconds." },
