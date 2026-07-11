@@ -296,7 +296,7 @@ function versionInfo() {
     precision_tiers: { coarse: ">= 1 s", standard: ">= 1 ms", high: ">= 1 µs (representation)", ultra: ">= 1 ns (representation)" },
     trust_tiers: { T0: "unknown", T1: "local, unsynchronized", T2: "network-synchronized", T3: "authenticated source", T4: "calibrated authoritative chain" },
     current_trust_tier: "T2",
-    rate_limit_policy: { enforced: false, note: "No per-key limit yet; Cloudflare edge/DDoS protection is active. Enterprise keys later." },
+    rate_limit_policy: { enforced: true, mechanism: "cloudflare-workers-ratelimit (approximate per CF design)", anonymous_per_min: 120, scope: "/v1/* per IP", note: "§38; every /v1/* call passes the native limiter (429 on reject) + edge/DDoS protection. Hard per-key guarantees would use a Durable Object. Contact licensing for higher tiers." },
     honesty: "precision is not accuracy; ns/us fields are format-padding on a millisecond source (§16).",
   }, {}, "public, max-age=300");
 }
@@ -654,6 +654,18 @@ export default {
     const p = url.pathname.replace(/\/+$/, "") || "/";
     const origin = url.origin;
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
+
+    // §38 rate limiting — 120 req/min per IP on the /v1/* API (Workers native limiter).
+    if (env && env.API_RL && p.startsWith("/v1/")) {
+      const ip = request.headers.get("CF-Connecting-IP") || "anon";
+      try {
+        const { success } = await env.API_RL.limit({ key: ip });
+        if (!success) return new Response(JSON.stringify({ ok: false,
+          error: { code: "RATE_LIMITED", message: "120 requests/min per IP (§38). Back off; /v1/now is no-store but you rarely need it more than ~1/s. Contact licensing for a higher tier." },
+          meta: { api_version: API_VERSION, request_id: rid() } }, null, 2),
+          { status: 429, headers: { "Content-Type": "application/json; charset=utf-8", ...CORS, "Retry-After": "60" } });
+      } catch (e) { /* limiter best-effort; never block on its failure */ }
+    }
 
     if (p === "/v1/now") return ok(await signInstant(env, nowEnvelope()), { server_observed_at: new Date().toISOString() }, "no-store");
     if (p === "/v1/version") return versionInfo();
