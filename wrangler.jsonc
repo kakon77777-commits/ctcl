@@ -1,0 +1,19 @@
+// CTCL — Common Temporal Coordinate Layer. Self-contained Worker (API + page + SDK).
+// Deploy:  npx wrangler deploy   (from this folder)
+// The worker NAME is "ctcl" — same as before the migration out of unbounded-axiom —
+// so this deploys the SAME Cloudflare Worker and commoninstant.org keeps serving.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ctcl",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-06-01",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "routes": [
+    { "pattern": "commoninstant.org", "custom_domain": true },
+    { "pattern": "www.commoninstant.org", "custom_domain": true }
+  ],
+  "kv_namespaces": [
+    { "binding": "CTCL_KV", "id": "0d1fe7906c0f499ab5a0fb98b12c1be9" }
+  ]
+}

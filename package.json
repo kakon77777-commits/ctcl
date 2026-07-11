@@ -1,0 +1,16 @@
+{
+  "name": "ctcl",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CTCL — Common Temporal Coordinate Layer: a verified reference instant + heterogeneous time transformation layer for agents. Same instant, different representations.",
+  "homepage": "https://commoninstant.org",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "dry": "wrangler deploy --dry-run"
+  },
+  "devDependencies": {
+    "wrangler": "^4.110.0"
+  }
+}
