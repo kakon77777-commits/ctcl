@@ -4,7 +4,7 @@
 layer for agents. **Same instant, different representations** — a reference layer, not a
 timing authority.
 
-**Live:** https://commoninstant.org · by Neo.K / 一言諾科技有限公司 (EveMissLab)
+**Live:** https://commoninstant.org · by Neo.K / 一言諾科技有限公司 (EveMissLab) · **License:** [Apache-2.0](LICENSE)
 
 For agents, simulators, robots, digital twins and persistent AI, a real time
 infrastructure should not just return "now" — it should provide a **verified common
@@ -159,10 +159,11 @@ build step (consistent with this Worker's own architecture):
 - **Governance/Rights** — `/ai/governance/{license,usage-policy,provenance,
   citation-policy,crawler-policy,versioning-policy}.md` + `/ai/rights-spectrum.json`.
 
-**Honest note on the rights spectrum:** this repository does not yet have a published
-LICENSE. Rather than assume an open default, `rights-spectrum.json` and
-`governance/license.md` state that plainly — reading/summarization/citation are
-welcomed, but training/fine-tuning/commercial-use/redistribution are marked
-`license_required` until a license is actually chosen and published.
+**License: Apache-2.0** (decided 2026-07-12, matching EML). Full text in
+[`LICENSE`](LICENSE). `rights-spectrum.json` reflects it directly — every AIRS/AILP
+dimension (access, training, commercial use, redistribution, ...) is maximally open,
+conditioned only on preserving copyright/license notices (attribution). Commercial
+value for CTCL is intended to come from hosting the canonical instance and enterprise
+integration/support (whitepaper §16), not from restricting reuse of the code or spec.
 
 Migrated out of the `unbounded-axiom` repo into this standalone project on 2026-07-11.

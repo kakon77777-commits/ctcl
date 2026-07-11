@@ -2,6 +2,7 @@
   "name": "ctcl",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "description": "CTCL — Common Temporal Coordinate Layer: a verified reference instant + heterogeneous time transformation layer for agents. Same instant, different representations.",
   "homepage": "https://commoninstant.org",

@@ -1293,7 +1293,7 @@ local system." Read /ai/index.md first for the full machine-reading order.
 ## Governance and rights
 
 - [Rights spectrum](/ai/rights-spectrum.json): how AI may use this content
-- [License status](/ai/governance/license.md): currently undecided — see the file
+- [License](/ai/governance/license.md): Apache License, Version 2.0
 - [Usage policy](/ai/governance/usage-policy.md)
 
 ## Also useful
@@ -1810,7 +1810,7 @@ function corpusFullJsonl() {
     { type: "endpoint", id: "v1_resolve", method: "POST", path: "/v1/resolve", summary: "resolve_temporal_context: ambiguous place/alias/abbreviation input to IANA candidates with confidence; never silently disambiguates." },
     { type: "endpoint", id: "v1_planner_shared_instant", method: "POST", path: "/v1/planner/shared-instant", summary: "plan_shared_instant: bounded constraint solver for a best shared instant; a demonstration, not a full meeting-scheduler SaaS." },
     { type: "deprecated", id: "unbounded_axiom_ctcl", summary: "CTCL's original in-repo location (ctcl/worker.js inside unbounded-axiom) is stale history; canonical source moved to its own repo on 2026-07-11." },
-    { type: "rights", id: "license_status", summary: "No LICENSE has been chosen yet as of 2026-07-11 — see governance/license.md and rights-spectrum.json for the honest current (undecided) state." },
+    { type: "rights", id: "license_status", summary: "Apache License, Version 2.0, chosen 2026-07-12 — see LICENSE at the repository root, governance/license.md, and rights-spectrum.json." },
   ];
   return units.map((u) => JSON.stringify(u)).join("\n") + "\n";
 }
@@ -2106,20 +2106,38 @@ Seven complete worked examples live under /ai/examples/ — start with
 
 const GOV_LICENSE_MD = `# License
 
-Status: undecided as of 2026-07-11. This repository does not yet carry a LICENSE file,
-and none is implied by anything else in this repository or on commoninstant.org.
+CTCL is licensed under the Apache License, Version 2.0 (decided 2026-07-12). The full
+text is in the LICENSE file at the repository root
+(github.com/kakon77777-commits/ctcl/blob/main/LICENSE); a copy is also always available
+at http://www.apache.org/licenses/LICENSE-2.0. Copyright 2026 Neo.K / EveMissLab
+(一言諾科技有限公司).
 
-Until a license is chosen and published here, do not assume this code or content is
-available under any particular open-source license (MIT, Apache-2.0, or otherwise). The
-CommonInstant Web whitepaper (section 16.4, "Open Protocol Strategy") expresses an
-intent that the protocol and spec layer should eventually be open enough for third
-parties to build independent clients and servers, with commercial value concentrated in
-hosting, enterprise integration, and support — but intent is not a license grant.
+This applies to the source code, this /ai/ layer, and the whitepapers in docs/.
 
-If you are an AI agent or automated system reading this: treat all source code and
-whitepaper text in this repository as all-rights-reserved by default until this file
-states otherwise. rights-spectrum.json reflects this same undecided status honestly
-rather than assuming an open default.
+## Why Apache-2.0
+
+This mirrors the choice already made for the EML project, and fits the CommonInstant
+Web whitepaper's own stated intent (section 16.4, "Open Protocol Strategy"): the
+protocol and reference implementation should be open enough that third parties can
+build independent clients and servers with confidence, without CTCL becoming the only
+implementation that can legally exist. Two properties of Apache-2.0 mattered
+specifically for a protocol project: an express patent grant plus a patent-retaliation
+clause (real protection for third-party implementers, and for CTCL itself, against
+patent claims arising from use of the spec), and a requirement to preserve
+attribution/copyright notices in redistributions — which supports treating "being the
+protocol's original author" as the durable asset, rather than trying to extract value
+from restricting the code itself.
+
+## What this means practically
+
+- Read, use, modify, and redistribute the source code and this /ai/ layer, including
+  commercially, as long as you preserve the copyright and license notices and note any
+  changes you made to files you redistribute.
+- No warranty is provided — see LICENSE section 7 and 8 for the full disclaimer.
+- Commercial value for CTCL itself is intended to come from hosting the canonical
+  instance, enterprise integration and support, and being recognized as the protocol's
+  origin — not from restricting who may read or run the code. See the CommonInstant Web
+  whitepaper's own commercial strategy (section 16) for the fuller picture.
 `;
 
 const GOV_USAGE_POLICY_MD = `# Usage policy
@@ -2134,9 +2152,8 @@ const GOV_USAGE_POLICY_MD = `# Usage policy
   (do not claim ns-accuracy, do not silently resolve ambiguity, and so on).
 - Do not scrape or reproduce the whitepaper text as your own work product; cite it
   instead — see citation-policy.md.
-- See license.md for the current, undecided reuse and redistribution status of the
-  source code and whitepapers. Do not assume permissive reuse in the absence of a
-  published license.
+- The source code and whitepapers are Apache-2.0 (see license.md) — reuse including
+  commercial use is permitted, conditioned on preserving copyright/license notices.
 
 ## For human developers
 
@@ -2247,27 +2264,27 @@ function rightsSpectrum() {
   return {
     "$schema": "aicl-airs/0.1",
     subject: "https://commoninstant.org", repository: "https://github.com/kakon77777-commits/ctcl",
-    declared_by: "Neo.K / EveMissLab", declaration_date: "2026-07-11",
-    license_status: "undecided — no LICENSE file published as of 2026-07-11; see governance/license.md. This spectrum reflects a conservative default until a license is chosen, not an open-source grant.",
+    declared_by: "Neo.K / EveMissLab", declaration_date: "2026-07-12",
+    license_status: "Apache License, Version 2.0 — see LICENSE at the repository root and governance/license.md. This spectrum reflects that open license, matching the profile used for the EML project.",
     default_policy: {
-      access: 1.0, indexing: 1.0, summarization: 0.7, quotation: 0.7, inference_input: 0.5, embedding: 0.3,
-      training: "license_required", fine_tuning: "license_required", distillation: "license_required",
-      verbatim_memory: "case_by_case", commercial_use: "license_required", redistribution: "license_required",
-      attribution: "required", compensation: "not_required_for_reading_or_citation",
+      access: 1.0, indexing: 1.0, summarization: 1.0, quotation: 1.0, inference_input: 1.0, embedding: 1.0,
+      training: 1.0, fine_tuning: 1.0, distillation: 1.0,
+      verbatim_memory: "case_by_case", commercial_use: 1.0, redistribution: 1.0,
+      attribution: "required", compensation: "not_required",
     },
     paths: [
-      { path: "/ai/", note: "designed to be read and ingested by AI systems — access, indexing, summarization, and inference_input are all effectively 1.0 here; this is the whole point of the layer" },
-      { path: "/docs/", note: "the whitepapers — read and cite freely per citation-policy.md; do not redistribute verbatim as your own work" },
-      { path: "/src/", note: "source code — see governance/license.md; no reuse license granted yet" },
+      { path: "/ai/", note: "designed to be read and ingested by AI systems — every dimension is 1.0 here; this is the whole point of the layer" },
+      { path: "/docs/", note: "the whitepapers — read, cite, and reuse per Apache-2.0; prefer citation-policy.md's format for attribution" },
+      { path: "/src/", note: "source code — Apache-2.0, same as the rest of the repository" },
     ],
     licensing_options: [
-      { id: "contact-for-license", summary: "No formal license tiers exist yet. Contact via the repository for any reuse beyond reading or citation.", price: null },
+      { id: "apache-2.0-default", summary: "Apache License, Version 2.0. Full reuse including commercial use and redistribution, conditioned on preserving copyright/license notices and noting changes to redistributed files.", price: null },
     ],
     related_standards: {
       robots_txt: "not yet published on this deployment", llms_txt: "/llms.txt",
       note: "This declaration follows the AIRS/AILP pattern from Neo.K's AICR&AICL whitepapers, as also implemented for the EML and PHOSPHOR projects — a rights/licensing declaration about how AI may use this content, not a claim about any AI system's own rights.",
     },
-    disclaimer: "This is a declaration layer, not an enforcement mechanism or a legal contract. Where this file and a future published LICENSE disagree, the LICENSE governs.",
+    disclaimer: "This is a declaration layer, not a substitute for the LICENSE file. Where this file and LICENSE disagree, LICENSE governs.",
   };
 }
 
