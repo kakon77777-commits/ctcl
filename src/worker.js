@@ -173,8 +173,9 @@ async function registerInstant(req, env) {
     from_wall_clock: body.value == null,
   };
   await env.CTCL_KV.put("instant:" + uuidOf(id), JSON.stringify(rec));
-  return ok({ ...rec, retrieve: `/v1/instant/${id}`, ...instantViews(ns) },
-    { note: "Registered. Any agent can GET /v1/instant/{id} to align on this exact instant (§27). Store the id in memory, not a bare number." });
+  const origin = new URL(req.url).origin;
+  return ok({ ...rec, retrieve: `/v1/instant/${id}`, share: `${origin}/i/${uuidOf(id)}`, ...instantViews(ns) },
+    { note: "Registered. Any agent can GET /v1/instant/{id} to align on this exact instant (§27); humans can open `share` (§4.4). Store the id in memory, not a bare number." });
 }
 
 async function getInstant(id, env) {
@@ -567,6 +568,103 @@ async function inspectBoundary(req, env) {
   return fail("INVALID_TIME_VALUE", "provide either {timezone, local_value, window_hours?} or {system_id, value?, encoding?}");
 }
 
+// ---- Share Instant (P4 — CommonInstant Web whitepaper §4.4/§5.2/§6.7) -----
+// A human-readable counterpart to GET /v1/instant/{id}: https://commoninstant.org/i/<id>.
+// Anyone with the link can read the same reference instant and project it into their
+// own timezone — the concrete "共同瞬間分享層". Untrusted input touches this page in two
+// places (the URL id, and the user-supplied `label` stored at registration) so both are
+// HTML-escaped before interpolation.
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function shareStyles() {
+  return `:root{--bg:#14100a;--surf:#1e190f;--ink:#ece3d0;--dim:#b6ab90;--faint:#7d7259;--gold:#cda24f;--line:#2c2515;--mono:'JetBrains Mono',ui-monospace,'SF Mono',Consolas,monospace;--sans:ui-sans-serif,system-ui,'Segoe UI',Roboto,sans-serif}
+@media (prefers-color-scheme: light){:root{--bg:#f4eddc;--surf:#fbf6ea;--ink:#241d11;--dim:#5e5540;--faint:#897b60;--gold:#8c6c1c;--line:#e3d7bd}}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:16px/1.6 var(--sans);padding:2.2rem 1.2rem 4rem}
+.wrap{max-width:640px;margin:0 auto}
+a{color:var(--gold)}
+h1{font-size:1.5rem;margin-bottom:.3rem}
+.eyebrow{font:600 .68rem/1 var(--mono);letter-spacing:.2em;text-transform:uppercase;color:var(--faint);margin-bottom:.6rem}
+.card{border:1px solid var(--line);border-radius:.8rem;background:var(--surf);padding:1.3rem 1.4rem;margin-top:1.2rem}
+.row{display:flex;justify-content:space-between;gap:1rem;font-family:var(--mono);font-size:.82rem;padding:.35rem 0;border-top:1px solid var(--line)}
+.row:first-child{border-top:0}
+.row .k{color:var(--faint);white-space:nowrap}
+.row .v{color:var(--gold);text-align:right;word-break:break-all}
+.big{font-family:var(--mono);font-size:1.1rem;margin:.3rem 0 1rem;word-break:break-all}
+.actions{display:flex;gap:.6rem;flex-wrap:wrap;margin-top:1rem}
+.btn{font:600 .84rem/1 var(--sans);border-radius:.5rem;padding:.6rem 1rem;cursor:pointer;border:1px solid var(--gold);background:transparent;color:var(--ink);text-decoration:none;display:inline-flex;align-items:center}
+.btn.pri{background:var(--gold);color:#1a1408}
+.pg{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-top:.9rem}
+.pg input{font-family:var(--mono);font-size:.85rem;background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:.4rem;padding:.5rem .65rem}
+pre{font-family:var(--mono);font-size:.78rem;line-height:1.55;background:var(--bg);border:1px solid var(--line);border-radius:.5rem;padding:.9rem 1rem;overflow-x:auto;margin-top:.8rem;color:var(--ink)}
+footer{margin-top:2.4rem;color:var(--faint);font-size:.8rem}
+footer a{color:var(--dim)}`;
+}
+function shareNotFound(origin, rawId, reason, status) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CTCL · Instant not found</title><style>${shareStyles()}</style></head><body><div class="wrap">
+<div class="eyebrow">CTCL · Shared Instant</div>
+<h1>Not found</h1>
+<p style="color:var(--dim)">${escHtml(reason)} (<code>${escHtml(rawId)}</code>)</p>
+<div class="actions"><a class="btn pri" href="${origin}/">&larr; back home</a></div>
+</div></body></html>`;
+}
+function sharePage(origin, rec, views) {
+  const uuid = uuidOf(rec.id);
+  const shareUrl = origin + "/i/" + uuid;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CTCL · Shared instant ${uuid.slice(0, 8)}</title>
+<meta name="description" content="A CTCL common reference instant, verified and shareable across agents and systems.">
+<style>${shareStyles()}</style></head><body><div class="wrap">
+<div class="eyebrow">CTCL &middot; Shared Instant</div>
+<h1>One instant, any local time</h1>
+<p style="color:var(--dim)">Anyone with this link aligns on the exact same reference instant — project it into your own timezone below.</p>
+<div class="card">
+ <div class="big">${escHtml(views.encodings.rfc3339)}</div>
+ <div class="row"><span class="k">instant_id</span><span class="v">${escHtml(rec.id)}</span></div>
+ <div class="row"><span class="k">unix_ns</span><span class="v">${escHtml(views.encodings.unix_ns)}</span></div>
+ <div class="row"><span class="k">unix_s</span><span class="v">${escHtml(views.encodings.unix_s)}</span></div>
+ <div class="row"><span class="k">tai (approx)</span><span class="v">${escHtml(views.timescales.tai_approx)}</span></div>
+ <div class="row"><span class="k">gps (approx)</span><span class="v">${escHtml(views.timescales.gps_approx)}</span></div>
+ <div class="row"><span class="k">registered_at</span><span class="v">${escHtml(rec.registered_at)}</span></div>
+ ${rec.label ? `<div class="row"><span class="k">label</span><span class="v">${escHtml(rec.label)}</span></div>` : ""}
+ <div class="row"><span class="k">source</span><span class="v">${rec.from_wall_clock ? "edge wall clock (at registration)" : "explicit value"}</span></div>
+</div>
+<div class="pg">
+ <label class="mono" style="color:var(--faint);font-size:.75rem">project into tz <input id="tz" value="Asia/Taipei" aria-label="IANA timezone"></label>
+ <button class="btn pri" id="go">convert &rarr;</button>
+</div>
+<pre id="out">…</pre>
+<div class="actions">
+ <button class="btn" id="copyLink">copy share link</button>
+ <button class="btn" id="copyJson">copy JSON</button>
+ <a class="btn" href="/v1/instant/${encodeURIComponent(uuid)}">raw JSON API</a>
+</div>
+<footer>CTCL v0.1 &middot; a reference + transformation layer, not a timing authority. <a href="/">&larr; home</a> &middot; <a href="/ai/ctcl.json">agent tool declaration</a></footer>
+</div>
+<script>
+var O=location.origin;function $(i){return document.getElementById(i)}
+var NS=${JSON.stringify(views.encodings.unix_ns)};
+async function go(){try{
+ var r=await(await fetch(O+'/v1/convert',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({input:{value:NS,encoding:'unix_ns'},output:{encoding:'rfc3339',timezone:$('tz').value}})})).json();
+ $('out').textContent=JSON.stringify(r.ok?r.data:r,null,2);
+}catch(e){$('out').textContent=String(e)}}
+$('go').addEventListener('click',go);
+$('copyLink').addEventListener('click',function(){navigator.clipboard.writeText(${JSON.stringify(shareUrl)})});
+$('copyJson').addEventListener('click',async function(){var t=await(await fetch(O+'/v1/instant/${encodeURIComponent(uuid)}')).text();navigator.clipboard.writeText(t)});
+</script>
+</body></html>`;
+}
+async function instantSharePage(origin, rawId, env) {
+  const headers = { "Content-Type": "text/html; charset=utf-8", ...CORS };
+  if (!env || !env.CTCL_KV) return new Response(shareNotFound(origin, rawId, "Registry not configured on this deployment."), { status: 503, headers });
+  const raw = await env.CTCL_KV.get("instant:" + uuidOf(rawId));
+  if (!raw) return new Response(shareNotFound(origin, rawId, "No such registered instant."), { status: 404, headers });
+  const rec = JSON.parse(raw);
+  return new Response(sharePage(origin, rec, instantViews(BigInt(rec.unix_ns))), { headers });
+}
+
 // ---- endpoints -------------------------------------------------------------
 
 async function handleConvert(req) {
@@ -653,8 +751,8 @@ function toolDeclaration(origin) {
       { name: "transform", method: "POST", path: "/v1/transform", desc: "Map a reference (parent) time into a custom linear-rate system (game world / accelerated sim / child clock).",
         input: { value: "string (parent time)", value_encoding: "unix_s", system: { parent: "ctcl:system:unix", epoch: { parent_value: "unix_s" }, rate: { value: "number" }, offset: "number", calendar: { day_seconds: "int", year_days: "int" } } },
         output: "system time + optional world calendar" },
-      { name: "register-instant", method: "POST", path: "/v1/instants", desc: "Register a reference instant I* (the current instant, or a given value) → get a shareable id. THE multi-agent primitive: another agent GETs that id and aligns on the exact same instant.",
-        input: { value: "string? (default: now)", encoding: "unix_s|…?", timescale: "utc?", label: "string?", meta: "object?" }, output: "instant_id + retrieve URL + all encodings/timescales" },
+      { name: "register-instant", method: "POST", path: "/v1/instants", desc: "Register a reference instant I* (the current instant, or a given value) → get a shareable id. THE multi-agent primitive: another agent GETs that id and aligns on the exact same instant. Also returns a human `share` URL (/i/{id}, §4.4).",
+        input: { value: "string? (default: now)", encoding: "unix_s|…?", timescale: "utc?", label: "string?", meta: "object?" }, output: "instant_id + retrieve URL + share URL + all encodings/timescales" },
       { name: "get-instant", method: "GET", path: "/v1/instant/{id}", desc: "Retrieve a registered instant by id — aligns you on the same I* another agent registered.",
         input: { id: "ctcl:instant:… or bare uuid" }, output: "instant record + all encodings/timescales" },
       { name: "create-system", method: "POST", path: "/v1/systems", desc: "Persist a custom linear-rate time system (game world / accelerated sim / child clock) for reuse.",
@@ -697,6 +795,7 @@ function openapi(origin) {
       "/v1/transform": { post: { summary: "Map into a custom linear-rate system", responses: { 200: { description: "ok" } } } },
       "/v1/instants": { post: { summary: "Register a reference instant (multi-agent I*)", responses: { 200: { description: "ok" }, 503: { description: "registry unavailable" } } } },
       "/v1/instant/{id}": { get: { summary: "Retrieve a registered instant", responses: { 200: { description: "ok" }, 404: { description: "unknown instant" } } } },
+      "/i/{id}": { get: { summary: "Human-readable Share Instant page (§4.4) — HTML, not JSON", responses: { 200: { description: "ok (html)" }, 404: { description: "unknown instant (html)" } } } },
       "/v1/systems": { get: { summary: "List custom systems", responses: { 200: { description: "ok" } } }, post: { summary: "Create a persistent custom system", responses: { 200: { description: "ok" } } } },
       "/v1/systems/{id}": { get: { summary: "Get a system definition", responses: { 200: { description: "ok" }, 404: { description: "unknown system" } } } },
       "/v1/systems/{id}/now": { get: { summary: "Current time in a custom system", responses: { 200: { description: "ok" } } } },
@@ -899,6 +998,8 @@ export default {
       return getGroup(rest, env);
     }
     if (p === "/v1/boundaries/inspect" && request.method === "POST") return inspectBoundary(request, env);
+    if (p === "/i") return Response.redirect(origin + "/", 302);
+    if (p.startsWith("/i/")) return instantSharePage(origin, decodeURIComponent(p.slice(3)), env);
     if (p === "/v1/path") return transformPath(url, env);
     if (p === "/v1/validate" && request.method === "POST") return validateTime(request);
     if (p === "/v1/transforms") return transformsCatalog(null);
@@ -1072,6 +1173,7 @@ footer a{color:var(--dim)}
    <p class="lede" data-zh="CTCL 給異質的 agent、模擬器與持續存在的 AI 一個驗證過的共同參考瞬間 —— 不用共用時鐘、曆法或 epoch。同一瞬間，不同表示。">CTCL gives heterogeneous agents, simulators and persistent AI a verified common reference instant — without sharing a clock, calendar, or epoch. Same instant, different representations.</p>
    <div class="cta">
     <a class="btn pri" href="/v1/now" target="_blank" rel="noopener" data-zh="取得驗證瞬間 →">Get a verified instant →</a>
+    <button class="btn sec" id="shareBtn" data-zh="分享此刻 →">Share this instant →</button>
     <a class="btn sec" href="/ai/ctcl.json" data-zh="Agent 工具宣告">Agent tool declaration</a>
    </div>
   </div>
@@ -1113,6 +1215,7 @@ footer a{color:var(--dim)}
    <div class="ep"><span class="m">GET</span><span class="path">/v1/systems/{id}/now</span><span class="d" data-zh="該世界當前時間＋世界曆">current time in that world + world calendar</span></div>
    <div class="ep"><span class="m">POST</span><span class="path">/v1/temporal-groups/{id}/expand</span><span class="d" data-zh="一瞬間展開到群組內每個系統（Web 旗艦功能）">project one instant across every system in a group (flagship Web feature)</span></div>
    <div class="ep"><span class="m">POST</span><span class="path">/v1/boundaries/inspect</span><span class="d" data-zh="主動檢查 DST gap／fold／暫停／速率變化，從不報錯">proactive gap／fold／pause／rate-change check, never errors</span></div>
+   <div class="ep"><span class="m">GET</span><span class="path">/i/{id}</span><span class="d" data-zh="人類可讀的分享頁 —— 任何人都能對齊到同一瞬間">human-readable share page — anyone can align on the same instant</span></div>
    <div class="ep"><span class="m">GET</span><span class="path">/ai/ctcl.json</span><span class="d" data-zh="agent 工具宣告 —— 先讀這個">agent tool declaration — read this first</span></div>
   </div>
  </section>
@@ -1250,5 +1353,10 @@ $('ggo').addEventListener('click',tryExpand);
 async function tryInspect(){var body={timezone:$('btz').value,local_value:$('bv').value};
  try{var r=await(await fetch(O+'/v1/boundaries/inspect',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();$('bout').textContent=JSON.stringify(r.ok?r.data:r,null,2)}catch(e){$('bout').textContent=String(e)}}
 $('bgo').addEventListener('click',tryInspect);
+// share this instant — navigate (not window.open: popup blockers reject open() after an await)
+$('shareBtn').addEventListener('click',async function(){try{
+ var r=await(await fetch(O+'/v1/instants',{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).json();
+ if(r.ok&&r.data.share)location.href=r.data.share;
+}catch(e){}});
 </script></body></html>`;
 }

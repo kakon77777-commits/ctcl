@@ -47,7 +47,7 @@ that first.
 | `GET /v1/now` | verified reference instant — encodings, timescales, source, uncertainty, stable `instant_id` |
 | `POST /v1/convert` | cross encoding / timescale / timezone; BigInt-nanosecond precision-preserving; DST ambiguity (§18) |
 | `POST /v1/transform` | map a parent time into a custom linear-rate world clock |
-| `POST /v1/instants` · `GET /v1/instant/{id}` | register / retrieve a shared instant I\* (multi-agent alignment) |
+| `POST /v1/instants` · `GET /v1/instant/{id}` · `GET /i/{id}` | register / retrieve a shared instant I\* (multi-agent alignment); `/i/{id}` is the human-readable **Share Instant** page |
 | `POST /v1/systems` · `GET /v1/systems` · `/{id}` · `/{id}/now` | persistent custom systems — `rate.type` = constant \| piecewise \| **paused** (active-time) \| table |
 | `GET /v1/path` | transform-graph route between systems/timescales |
 | `POST /v1/temporal-groups` · `GET /v1/temporal-groups` · `/{id}` · `POST /{id}/expand` | **Temporal Groups** — "One Instant, Many Systems": project one instant across every member (builtin timescale \| `tz:<IANA>` \| custom system id) in a single call |
@@ -103,8 +103,13 @@ homepage has a live demo. **P2 — Boundary Inspector shipped 2026-07-11**:
 plus upcoming DST transitions within a window; given `{system_id, value?}` returns
 `normal`/`pause`/`rate_change` for a custom system; always returns a status instead of
 erroring (unlike `/v1/convert`), so an agent can pre-flight-check before committing.
-Remaining Web-whitepaper priorities: P3 persisted-group polish, P4 Share Instant
-(`/i/<id>`), P5 semantic resolution (`resolve_temporal_context`), P6 constraint planner
+**P4 — Share Instant shipped 2026-07-11**: `GET /i/{id}` is a human-readable counterpart
+to `GET /v1/instant/{id}` — instant details, a live "project into your timezone" convert
+form, copy-link/copy-JSON, and a raw-JSON-API link; `POST /v1/instants` now also returns a
+`share` URL; homepage has a "Share this instant" button. User-controlled content (the
+`label` field, the URL id itself) is HTML-escaped before rendering — verified against both
+stored and reflected XSS. Remaining Web-whitepaper priorities: P3 persisted-group polish,
+P5 semantic resolution (`resolve_temporal_context`), P6 constraint planner
 (`plan_shared_instant`).
 
 Migrated out of the `unbounded-axiom` repo into this standalone project on 2026-07-11.
