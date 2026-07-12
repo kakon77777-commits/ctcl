@@ -172,6 +172,10 @@ async function registerInstant(req, env) {
     registered_at: new Date().toISOString(), label: body.label || null, meta: body.meta || null,
     from_wall_clock: body.value == null,
   };
+  // §31: sign at registration time and persist the signature, so every future GET of
+  // this instant (by any agent, in any later session) returns the same verifiable proof.
+  const sig = await ed25519SignFields(env, rec.id, rec.unix_ns, rec.reference_timescale);
+  if (sig) rec.signature = sig;
   await env.CTCL_KV.put("instant:" + uuidOf(id), JSON.stringify(rec));
   const origin = new URL(req.url).origin;
   return ok({ ...rec, retrieve: `/v1/instant/${id}`, share: `${origin}/i/${uuidOf(id)}`, ...instantViews(ns) },
@@ -309,8 +313,9 @@ const KNOWN_LIMITATIONS = [
   "custom_expression transform intentionally NOT implemented — arbitrary-expression eval is a security risk",
   "TAI/GPS timescales are a flat +37s/+18s approximation, not a live leap-second table",
   "rate limiting is per-colo approximate (Cloudflare's native limiter design), not a hard global per-key guarantee — that would need a Durable Object",
-  "signing (§31) covers /v1/now only; registered instants (/v1/instants) are not yet signed",
-  "offline mode (§39) and monotonic/rollback checks (§32/§33) are not implemented",
+  "signing (§31) covers /v1/now and registered instants (/v1/instants); custom system records are not signed",
+  "monotonic duration timing (§32), clock-rollback detection (§33), and offline degraded mode (§39) are implemented client-side in the SDK (monotonic/guardedNow/offlineNow) — the server itself does not track a client's local clock",
+  "no source allowlist or app-level audit log (§31.1) — the API is read-only/query-only (nothing external is ingested to allowlist), and Cloudflare's platform request logs are the only request log today",
   "gpu_availability and simulation_state planner constraints require an external data feed this deployment does not have",
   "no CLI or webhook relay yet — REST, SDK, and the web playground are the only interfaces today",
 ];
@@ -770,6 +775,7 @@ function developerConsolePage() {
 
 <h2 style="font-size:1.05rem;margin-top:1.6rem">Changelog</h2>
 <div class="card">
+ <div class="row"><span class="k">2026-07-12</span><span class="v">Registered instants (/v1/instants) now Ed25519-signed (§31); SDK gained monotonic() (§32), guardedNow() rollback detection (§33), offlineNow() degraded mode (§39), and a maxAgeMs staleness check in verifyInstant()</span></div>
  <div class="row"><span class="k">2026-07-11</span><span class="v">Constraint Planner, Semantic Resolution, Share Instant, Boundary Inspector, Temporal Groups — CommonInstant Web whitepaper P1–P6</span></div>
  <div class="row"><span class="k">2026-07-11</span><span class="v">Ed25519-signed instants (§31), native rate limiting (§38), table_lookup transform</span></div>
  <div class="row"><span class="k">2026-07-11</span><span class="v">Migrated to standalone repo (from unbounded-axiom)</span></div>
@@ -1041,7 +1047,7 @@ function toolDeclaration(origin) {
         input: { value: "string (parent time)", value_encoding: "unix_s", system: { parent: "ctcl:system:unix", epoch: { parent_value: "unix_s" }, rate: { value: "number" }, offset: "number", calendar: { day_seconds: "int", year_days: "int" } } },
         output: "system time + optional world calendar" },
       { name: "register-instant", method: "POST", path: "/v1/instants", desc: "Register a reference instant I* (the current instant, or a given value) → get a shareable id. THE multi-agent primitive: another agent GETs that id and aligns on the exact same instant. Also returns a human `share` URL (/i/{id}, §4.4).",
-        input: { value: "string? (default: now)", encoding: "unix_s|…?", timescale: "utc?", label: "string?", meta: "object?" }, output: "instant_id + retrieve URL + share URL + all encodings/timescales" },
+        input: { value: "string? (default: now)", encoding: "unix_s|…?", timescale: "utc?", label: "string?", meta: "object?" }, output: "instant_id + retrieve URL + share URL + all encodings/timescales + optional Ed25519 signature (§31)" },
       { name: "get-instant", method: "GET", path: "/v1/instant/{id}", desc: "Retrieve a registered instant by id — aligns you on the same I* another agent registered.",
         input: { id: "ctcl:instant:… or bare uuid" }, output: "instant record + all encodings/timescales" },
       { name: "create-system", method: "POST", path: "/v1/systems", desc: "Persist a custom linear-rate time system (game world / accelerated sim / child clock) for reuse.",
@@ -1067,7 +1073,7 @@ function toolDeclaration(origin) {
       { name: "validate", method: "POST", path: "/v1/validate", desc: "Validate a time value; returns warnings (POSIX-vs-UTC leap drift, out-of-range).", input: { value: "string", encoding: "unix_s|…", timescale: "utc|posix?" }, output: "valid + warnings + canonical_unix_ns" },
       { name: "transform-types", method: "GET", path: "/v1/transforms", desc: "Catalog of transform types (§12): identity, offset, linear_rate, piecewise, paused_clock (active-time), …", input: {}, output: "types + which are implemented" },
       { name: "version", method: "GET", path: "/v1/version", desc: "Versions, leap table, precision tiers (§35), trust tiers (§36), rate-limit policy (§38).", input: {}, output: "versions + tiers" },
-      { name: "pubkey", method: "GET", path: "/v1/pubkey", desc: "Ed25519 public key (§31) — verify a /v1/now instant's signature is authentic (not forged). SDK: verifyInstant().", input: {}, output: "alg + key_id + public_jwk" },
+      { name: "pubkey", method: "GET", path: "/v1/pubkey", desc: "Ed25519 public key (§31) — verify a /v1/now or registered-instant signature is authentic (not forged) and, optionally, not stale (replay check). SDK: verifyInstant(inst, {maxAgeMs}).", input: {}, output: "alg + key_id + public_jwk" },
     ],
     memory_contract: "For long-term memory: store instant_id + timescale + encoding + source_quality (do not store only a bare number). Distinguish event / write / recall instants (§10.4, §23).",
     not_a: ["universal clock authority", "timing/NTP replacement", "guaranteed ns-accurate global sync"],
@@ -1131,14 +1137,21 @@ async function getSignKey(env) {
 function signedString(inst) {
   return inst.instant.id + "|" + inst.encodings.unix_ns + "|" + inst.instant.reference.timescale;
 }
-async function signInstant(env, inst) {
+// Low-level signer shared by /v1/now (envelope shape) and the registered-instant
+// record shape — both sign over the same "id|unix_ns|timescale" convention (§31).
+async function ed25519SignFields(env, id, unixNs, timescale) {
   const key = await getSignKey(env);
-  if (!key) return inst;
+  if (!key) return null;
   try {
-    const sig = await crypto.subtle.sign({ name: "Ed25519" }, key, new TextEncoder().encode(signedString(inst)));
-    inst.signature = { alg: "Ed25519", key_id: KEY_ID, signed_fields: "instant_id|unix_ns|timescale",
+    const msg = id + "|" + unixNs + "|" + timescale;
+    const sig = await crypto.subtle.sign({ name: "Ed25519" }, key, new TextEncoder().encode(msg));
+    return { alg: "Ed25519", key_id: KEY_ID, signed_fields: "instant_id|unix_ns|timescale",
       value: btoa(String.fromCharCode(...new Uint8Array(sig))), verify: "/v1/pubkey" };
-  } catch (e) { /* signing is best-effort */ }
+  } catch (e) { return null; /* signing is best-effort */ }
+}
+async function signInstant(env, inst) {
+  const sig = await ed25519SignFields(env, inst.instant.id, inst.encodings.unix_ns, inst.instant.reference.timescale);
+  if (sig) inst.signature = sig;
   return inst;
 }
 async function pubKeyInfo(env) {
@@ -1168,6 +1181,8 @@ export function CTCL(base = '${origin}') {
   const j = async (p, opt) => (await fetch(B + p, opt)).json();
   const D = (r) => { if (r && r.ok) return r.data; throw Object.assign(new Error((r && r.error && r.error.code) || 'ctcl_error'), { ctcl: r }); };
   const post = (p, body) => j(p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+  let _lastSeenNs = null;   // §33 rollback detection state
+  let _lastKnownNow = null; // §39 offline-mode cache
   return {
     // core
     now:        async () => D(await j('/v1/now')),
@@ -1180,14 +1195,65 @@ export function CTCL(base = '${origin}') {
     convert:    async (input, output) => D(await post('/v1/convert', { input, output })),
     transform:  async (value, system, value_encoding = 'unix_s') => D(await post('/v1/transform', { value, value_encoding, system })),
     path:       async (from, to) => D(await j('/v1/path?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to))),
-    // §31 verify a signed instant against the published Ed25519 public key
-    verifyInstant: async (inst) => {
+    // §31 verify a signed instant against the published Ed25519 public key. Accepts
+    // either the /v1/now envelope shape or a flat registered-instant record (/v1/instants)
+    // -- both sign the same id|unix_ns|timescale fields. opts.maxAgeMs additionally flags
+    // a genuinely-signed-but-stale instant (an old attestation replayed as "now", §31.1).
+    verifyInstant: async (inst, opts = {}) => {
       if (!inst || !inst.signature) return { verified: false, reason: 'no_signature' };
+      const id = inst.instant ? inst.instant.id : inst.id;
+      const unixNs = inst.encodings ? inst.encodings.unix_ns : inst.unix_ns;
+      const timescale = inst.instant ? inst.instant.reference.timescale : inst.reference_timescale;
       const pk = D(await j('/v1/pubkey'));
       const key = await crypto.subtle.importKey('jwk', pk.public_jwk, { name: 'Ed25519' }, false, ['verify']);
-      const msg = new TextEncoder().encode(inst.instant.id + '|' + inst.encodings.unix_ns + '|' + inst.instant.reference.timescale);
+      const msg = new TextEncoder().encode(id + '|' + unixNs + '|' + timescale);
       const sig = Uint8Array.from(atob(inst.signature.value), (c) => c.charCodeAt(0));
-      return { verified: await crypto.subtle.verify({ name: 'Ed25519' }, key, sig, msg), key_id: pk.key_id };
+      const verified = await crypto.subtle.verify({ name: 'Ed25519' }, key, sig, msg);
+      const ageMs = Date.now() - Number(BigInt(unixNs) / 1000000n);
+      const stale = opts.maxAgeMs != null && ageMs > opts.maxAgeMs;
+      return { verified, key_id: pk.key_id, age_ms: ageMs, stale };
+    },
+
+    // §32 monotonic duration: independent of wall-clock jumps, for measuring elapsed
+    // time in agent tasks. const timer = t.monotonic(); ... const ms = timer.elapsedMs();
+    monotonic: () => {
+      const clock = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      const t0 = clock();
+      return { elapsedMs: () => clock() - t0 };
+    },
+    // §33 clock rollback detection: now() wrapped with a warning when a later call
+    // returns an EARLIER instant than a previous call (t_(n+1) < t_n).
+    guardedNow: async () => {
+      const data = D(await j('/v1/now'));
+      const ns = BigInt(data.encodings.unix_ns);
+      let rollback_warning = null;
+      if (_lastSeenNs !== null && ns < _lastSeenNs) {
+        rollback_warning = { code: 'CLOCK_ROLLBACK_DETECTED', previous_unix_ns: _lastSeenNs.toString(),
+          observed_unix_ns: ns.toString(), delta_ns: (_lastSeenNs - ns).toString() };
+      }
+      _lastSeenNs = ns;
+      return { ...data, rollback_warning };
+    },
+    // §39 offline degraded mode: caches the last successful /v1/now and, on a failed
+    // fetch, extrapolates from it via a local monotonic clock instead of throwing.
+    offlineNow: async () => {
+      const clock = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      try {
+        const data = D(await j('/v1/now'));
+        _lastKnownNow = { unix_ns: BigInt(data.encodings.unix_ns), at: clock(), envelope: data };
+        return data;
+      } catch (e) {
+        if (!_lastKnownNow) throw Object.assign(new Error('offline_no_cache'),
+          { ctcl: { ok: false, error: { code: 'OFFLINE_NO_CACHE', message: 'no prior successful /v1/now to extrapolate from' } } });
+        const elapsedMs = clock() - _lastKnownNow.at;
+        const extrapNs = _lastKnownNow.unix_ns + BigInt(Math.round(elapsedMs * 1e6));
+        const rfc3339 = new Date(Number(extrapNs / 1000000n)).toISOString();
+        return {
+          instant: { id: _lastKnownNow.envelope.instant.id, reference: { timescale: 'utc', value: rfc3339 } },
+          encodings: { unix_ms: String(extrapNs / 1000000n), unix_ns: extrapNs.toString(), rfc3339 },
+          quality: { mode: 'offline_degraded', based_on: _lastKnownNow.envelope.instant.id, extrapolated_elapsed_ms: elapsedMs },
+        };
+      }
     },
 
     // shared reference instant — multi-agent alignment (§27). Store the id in memory,
@@ -1420,8 +1486,8 @@ function aiManifest(origin) {
 const AI_VERSION_JSON = {
   manifest_version: "0.1", aicl_layer_version: "0.1", api_version: API_VERSION, release: "0.1",
   spec_version: "ctcl-v1", rights_spectrum_version: "0.1",
-  last_major_milestone: "CommonInstant Web whitepaper P0-P6 complete + Status/Developer Console pages + this AICL layer",
-  last_updated: "2026-07-11",
+  last_major_milestone: "Apache-2.0 license + registered-instant signing (§31) + SDK monotonic/rollback/offline (§32/§33/§39)",
+  last_updated: "2026-07-12",
 };
 
 const AI_SITEMAP_JSON = {
@@ -1513,7 +1579,8 @@ is ever missing.
   one-off custom linear-rate system).
 - Multi-agent alignment: POST /v1/instants plus GET /v1/instant/{id} plus the human
   GET /i/{id} Share Instant page — register once, any agent or a later session
-  retrieves the exact same instant.
+  retrieves the exact same instant, with an optional Ed25519 signature (§31)
+  persisted alongside it.
 - Custom temporal systems: POST and GET /v1/systems, GET /v1/systems/{id}/now —
   persistent world clocks with rate.type = constant, piecewise, paused (active-time,
   whitepaper section 25), or table.
@@ -1539,17 +1606,19 @@ live-rendered version of the same list:
 - Full leap-aware TAI/GPS conversion (currently a flat +37s/+18s approximation)
 - Hard per-key rate limiting (today's limiter is Cloudflare's native, per-colo
   approximate mechanism; a hard guarantee needs a Durable Object)
-- Signing beyond /v1/now (registered instants are not yet signed)
-- Offline mode, monotonic/rollback checks
+- Signing of custom system records (instants and /v1/now are signed; systems are not)
+- A source allowlist or app-level audit log (the API is read-only/query-only, so there
+  is nothing external to allowlist; Cloudflare's own platform request logs are the only
+  request log today)
 - gpu_availability and simulation_state planner constraints (no external data feed)
 - A live MCP server, a CLI, a webhook relay
 
 ## Tech stack
 
 Cloudflare Workers (plain JS, no framework), Workers KV (CTCL_KV), the Workers native
-rate limiter (API_RL), Ed25519 via WebCrypto for /v1/now signing, IANA tzdb via the
-runtime Intl object (no vendored tzdb). No build tool, no bundler, no external runtime
-dependency beyond wrangler for deploy tooling.
+rate limiter (API_RL), Ed25519 via WebCrypto for /v1/now and registered-instant
+signing, IANA tzdb via the runtime Intl object (no vendored tzdb). No build tool, no
+bundler, no external runtime dependency beyond wrangler for deploy tooling.
 `;
 
 const CORPUS_DESIGN_HISTORY_MD = `# Design history
@@ -1618,6 +1687,24 @@ list) and a Developer Console page (interfaces, error codes, version policy,
 changelog) closed out the CommonInstant Web whitepaper's remaining site structure.
 This /ai/ corpus and rights-spectrum declaration were added the same day, following the
 same AICL and AIRS/AILP pattern already used for the EML and PHOSPHOR projects.
+
+## 2026-07-12 — Apache-2.0, then closing the §31/§32/§33/§39 security-model gaps
+
+License resolved as Apache-2.0 (matching EML's profile — the patent grant protects
+third-party implementers of the protocol, and the attribution requirement supports
+being recognized as the protocol's author rather than guarding source secrecy).
+Then the Agent Time API whitepaper's Security Model section: registered instants
+(POST /v1/instants) are now Ed25519-signed the same way /v1/now already was, so a
+signature persists in the registry and survives a GET by any later agent or session.
+The client SDK gained three whitepaper-defined robustness primitives that are honestly
+client-side concerns, not server state: monotonic() (§32, a duration timer immune to
+wall-clock jumps), guardedNow() (§33, flags CLOCK_ROLLBACK_DETECTED when a later call
+returns an earlier instant than a previous one), and offlineNow() (§39, caches the last
+successful /v1/now and extrapolates from it via a local monotonic clock when the
+network fetch fails, returning quality.mode "offline_degraded" instead of throwing).
+verifyInstant() also gained an optional maxAgeMs staleness check — the replay half of
+§31.1's threat list, since a genuinely-signed-but-old instant should not be trusted as
+"now" indefinitely.
 `;
 
 const CORPUS_CONCEPT_GENEALOGY_MD = `# Concept genealogy
@@ -1643,8 +1730,11 @@ concepts are not "coming soon" — they were considered and declined.
 - Custom temporal systems with rate.type constant, piecewise, paused, or table.
 - Temporal Groups and the group-expand operation.
 - The Boundary Inspector's status enum: normal, gap, fold, pause, rate_change.
-- Ed25519 signing of /v1/now (note: scope is that one endpoint only — see
-  engineering-notes.md).
+- Ed25519 signing of /v1/now and registered instants (/v1/instants). Custom system
+  records are not signed — see engineering-notes.md.
+- SDK-side monotonic duration timing, clock-rollback detection, and offline degraded
+  mode (§32/§33/§39) — client-side concerns by the whitepaper's own definition, not
+  server state.
 
 ## Stable but deliberately narrow scope
 
@@ -1746,11 +1836,13 @@ const CORPUS_ACCEPTED_CONCEPTS_MD = `# Accepted concepts
 | Custom temporal systems (constant/piecewise/paused/table) | stable | 2026-07-11 |
 | Temporal Groups ("One Instant, Many Systems") | stable | 2026-07-11 |
 | Boundary Inspector (gap/fold/pause/rate_change) | stable | 2026-07-11 |
-| Ed25519 instant signing (/v1/now only) | stable, partial scope | 2026-07-11 |
+| Ed25519 instant signing (/v1/now, /v1/instants) | stable, partial scope | 2026-07-12 |
 | Semantic Resolution (place/alias to IANA) | stable, narrow scope | 2026-07-11 |
 | Constraint Planner (bounded window solver) | stable, narrow scope | 2026-07-11 |
 | Status/Trust Panel and Developer Console | stable | 2026-07-11 |
 | AICL/AIRS /ai/ layer | stable (this layer) | 2026-07-11 |
+| Apache License, Version 2.0 | frozen | 2026-07-12 |
+| SDK monotonic()/guardedNow()/offlineNow() (§32/§33/§39) | stable, client-side | 2026-07-12 |
 `;
 
 const CORPUS_DEPRECATED_CONCEPTS_MD = `# Deprecated / superseded

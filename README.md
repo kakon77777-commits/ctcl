@@ -90,13 +90,17 @@ Driving whitepapers in [`docs/`](docs/):
 - `CTCL_Temporal_Port_App_通用時間端口技術白皮書_v0.1.md` — a separate, not-yet-started
   installable desktop app (Rust core, local gateway, device clock observer) — future work
 
-v0.1 (Agent Time API) status (~80–85%): the §40 endpoint map is complete (13/13), MVP §50
+v0.1 (Agent Time API) status (~85–90%): the §40 endpoint map is complete (13/13), MVP §50
 complete, multi-agent alignment, active-time / life-history, precision-preserving convert,
-DST ambiguity, and the client SDK are all live. Remaining: `custom_expression` transform
-(intentionally unimplemented — arbitrary-expression eval is a security risk); enforcement
-layers (signed metadata beyond `/v1/now`, hard rate limits via Durable Object, trust
-elevation); offline mode; simulation / robotics / digital-twin adapters; full leap-aware
-TAI/GPS conversion.
+DST ambiguity, and the client SDK are all live. **§31/§32/§33/§39 closed 2026-07-12**:
+registered instants (`/v1/instants`) are now Ed25519-signed (not just `/v1/now`), and the
+SDK gained `monotonic()` (§32 duration timer immune to wall-clock jumps), `guardedNow()`
+(§33 `CLOCK_ROLLBACK_DETECTED` warning), `offlineNow()` (§39 cached extrapolation,
+`quality.mode: "offline_degraded"` instead of throwing), and a `maxAgeMs` staleness check
+in `verifyInstant()`. Remaining: `custom_expression` transform (intentionally
+unimplemented — arbitrary-expression eval is a security risk); signing custom system
+records; hard rate limits via Durable Object; trust elevation (T3/T4); simulation /
+robotics / digital-twin adapters; full leap-aware TAI/GPS conversion.
 
 CommonInstant Web whitepaper progress: P0 (schema/versioning/error-model stabilization) was
 already satisfied by the API whitepaper work above. **P1 — Temporal Groups ("One Instant,
@@ -167,3 +171,11 @@ value for CTCL is intended to come from hosting the canonical instance and enter
 integration/support (whitepaper §16), not from restricting reuse of the code or spec.
 
 Migrated out of the `unbounded-axiom` repo into this standalone project on 2026-07-11.
+
+**2026-07-12 — security-model gaps closed.** `POST /v1/instants` now signs the record at
+registration time and persists the signature, so `GET /v1/instant/{id}` and the `/i/{id}`
+share page both return the same verifiable proof no matter who retrieves it or when. The
+client SDK (`/sdk.js`) added `monotonic()`, `guardedNow()`, and `offlineNow()` — see the
+status paragraph above. `verifyInstant()` now also accepts the flat registered-instant
+shape (previously only the `/v1/now` envelope shape worked) and takes an optional
+`{maxAgeMs}` to flag a genuinely-signed-but-stale instant.
