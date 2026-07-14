@@ -27,9 +27,49 @@ const CORS = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 const API_VERSION = "v1";
-// Leap-second-dependent offsets. NOT a live leap table — current values with a caveat.
+// The LATEST known leap-second offset — used only for "current state" displays
+// (/v1/version, /v1/now's policy.leap_table, the tai/gps tool-declaration notes).
+// Per-instant TAI/GPS math below uses the full historical table instead, so a
+// registered instant from any past date gets the offset that was actually true
+// then, not today's offset applied retroactively.
 const LEAP = { tai_minus_utc_s: 37, gps_minus_utc_s: 18, as_of: "2017-01-01",
-  note: "Current offsets, not a live leap table. Verify for high-stakes/scientific use." };
+  note: "Latest known offset, not a live/future-predicting leap table. No leap second has been declared since 2017-01-01 (IERS Bulletin C); verify for high-stakes/scientific use." };
+
+// ---- §16/known_limitations: full leap-aware TAI/GPS conversion -------------
+// Historical TAI-UTC offset (seconds), effective from 00:00 UTC on each listed
+// date until superseded by the next entry. Source: IERS Bulletin C's historical
+// record — this is settled, unchanging history (unlike future leap seconds,
+// which nobody can predict; IERS announces those with only ~6 months' notice).
+// The modern leap-second system starts 1972-01-01; earlier dates are clamped to
+// the first entry rather than left undefined, since "give the closest known
+// answer" is more useful than refusing pre-1972 conversions outright.
+const LEAP_SECONDS_TABLE = [
+  [Date.UTC(1972, 0, 1), 10], [Date.UTC(1972, 6, 1), 11], [Date.UTC(1973, 0, 1), 12],
+  [Date.UTC(1974, 0, 1), 13], [Date.UTC(1975, 0, 1), 14], [Date.UTC(1976, 0, 1), 15],
+  [Date.UTC(1977, 0, 1), 16], [Date.UTC(1978, 0, 1), 17], [Date.UTC(1979, 0, 1), 18],
+  [Date.UTC(1980, 0, 1), 19], [Date.UTC(1981, 6, 1), 20], [Date.UTC(1982, 6, 1), 21],
+  [Date.UTC(1983, 6, 1), 22], [Date.UTC(1985, 6, 1), 23], [Date.UTC(1988, 0, 1), 24],
+  [Date.UTC(1990, 0, 1), 25], [Date.UTC(1991, 0, 1), 26], [Date.UTC(1992, 6, 1), 27],
+  [Date.UTC(1993, 6, 1), 28], [Date.UTC(1994, 6, 1), 29], [Date.UTC(1996, 0, 1), 30],
+  [Date.UTC(1997, 6, 1), 31], [Date.UTC(1999, 0, 1), 32], [Date.UTC(2006, 0, 1), 33],
+  [Date.UTC(2009, 0, 1), 34], [Date.UTC(2012, 6, 1), 35], [Date.UTC(2015, 6, 1), 36],
+  [Date.UTC(2017, 0, 1), 37],
+].map(([ms, offset]) => [ms, offset]); // [effective_at_unix_ms, tai_minus_utc_seconds]
+
+// GPS time was aligned to UTC at the GPS epoch (1980-01-06T00:00:00Z) and never
+// observes leap seconds afterward, so GPS-TAI is fixed at -19s forever; GPS-UTC
+// at any later instant is simply TAI-UTC(t) - 19. GPS didn't exist before its
+// epoch, so pre-epoch instants return null rather than a fabricated offset.
+const GPS_EPOCH_MS = Date.UTC(1980, 0, 6);
+
+function taiMinusUtcAtMs(ms) {
+  let offset = LEAP_SECONDS_TABLE[0][1];
+  for (const [effAt, off] of LEAP_SECONDS_TABLE) { if (ms >= effAt) offset = off; else break; }
+  return offset;
+}
+function gpsMinusUtcAtMs(ms) {
+  return ms < GPS_EPOCH_MS ? null : taiMinusUtcAtMs(ms) - 19;
+}
 
 const NS_PER = { s: 1000000000n, ms: 1000000n, us: 1000n, ns: 1n };
 
@@ -136,8 +176,17 @@ function nowEnvelope() {
 }
 
 // ---- instant views (shared by /v1/now and the registry) -------------------
+// tai_approx/gps_approx use the FULL historical leap-second table (see
+// LEAP_SECONDS_TABLE above), not a flat current-day offset — a registered
+// instant from 1990 gets 1990's true TAI-UTC offset (25s), not 2017's (37s).
+// Still "_approx": representation precision is millisecond-grade (§16), and a
+// future leap second not yet in the table would eventually make a post-2017
+// instant's offset stale until the table is updated — nobody can predict those.
 function instantViews(ns) {
   const iso = rfc3339(ns, "UTC");
+  const ms = Number(ns / NS_PER.ms);
+  const taiOffsetS = taiMinusUtcAtMs(ms);
+  const gpsOffsetS = gpsMinusUtcAtMs(ms);
   return {
     encodings: {
       unix_s: fromNs(ns, "unix_s"), unix_ms: fromNs(ns, "unix_ms"),
@@ -145,8 +194,8 @@ function instantViews(ns) {
     },
     timescales: {
       utc: iso, posix: fromNs(ns, "unix_s"),
-      tai_approx: fromNs(ns + BigInt(LEAP.tai_minus_utc_s) * NS_PER.s, "unix_s"),
-      gps_approx: fromNs(ns + BigInt(LEAP.gps_minus_utc_s) * NS_PER.s, "unix_s"),
+      tai_approx: fromNs(ns + BigInt(taiOffsetS) * NS_PER.s, "unix_s"),
+      gps_approx: gpsOffsetS == null ? "not_applicable_before_gps_epoch_1980-01-06T00:00:00Z" : fromNs(ns + BigInt(gpsOffsetS) * NS_PER.s, "unix_s"),
     },
   };
 }
@@ -313,9 +362,9 @@ async function runtimeHealth(env) {
 }
 const KNOWN_LIMITATIONS = [
   "custom_expression transform intentionally NOT implemented — arbitrary-expression eval is a security risk",
-  "TAI/GPS timescales are a flat +37s/+18s approximation, not a live leap-second table",
+  "TAI/GPS use the full historical leap-second table (1972-2017) for any given instant, but cannot predict FUTURE leap seconds — none have been declared since 2017-01-01, but if one is, post-that-date conversions are stale until the table is updated; GPS is not applicable before its 1980-01-06 epoch",
   "rate limiting is per-colo approximate (Cloudflare's native limiter design), not a hard global per-key guarantee — that would need a Durable Object",
-  "signing (§31) covers /v1/now, registered instants, and custom system definitions; Temporal Groups are not yet signed",
+  "signing (§31/§31.1) covers /v1/now, registered instants, custom system definitions, and Temporal Groups — every persisted resource type is signed",
   "monotonic duration timing (§32), clock-rollback detection (§33), and offline degraded mode (§39) are implemented client-side in the SDK (monotonic/guardedNow/offlineNow) — the server itself does not track a client's local clock",
   "no source allowlist or app-level audit log (§31.1) — the API is read-only/query-only (nothing external is ingested to allowlist), and Cloudflare's platform request logs are the only request log today",
   "gpu_availability and simulation_state planner constraints require an external data feed this deployment does not have",
@@ -468,6 +517,8 @@ async function createGroup(req, env) {
     created_at: existing ? existing.created_at : new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
+  const sig = await signGroupRecord(env, rec);
+  if (sig) rec.signature = sig;
   await env.CTCL_KV.put("group:" + grp.id, JSON.stringify(rec));
   return ok({ ...rec, expand: `/v1/temporal-groups/${encodeURIComponent(grp.id)}/expand` },
     { note: "POST /v1/temporal-groups/{id}/expand to project one instant across every member (§5.5 \"One Instant, Many Systems\")." });
@@ -781,7 +832,7 @@ function developerConsolePage() {
 
 <h2 style="font-size:1.05rem;margin-top:1.6rem">Changelog</h2>
 <div class="card">
- <div class="row"><span class="k">2026-07-14</span><span class="v">Share Instant page gained a server-rendered QR Code (§6.6); custom system definitions (/v1/systems) are now Ed25519-signed too (§31.1 signed transform metadata)</span></div>
+ <div class="row"><span class="k">2026-07-14</span><span class="v">Share Instant page gained a server-rendered QR Code (§6.6); custom systems and Temporal Groups are now Ed25519-signed too (§31.1) — every persisted resource type is signed; tai/gps timescales are now leap-aware via the full 1972-2017 historical offset table instead of a flat current-day offset</span></div>
  <div class="row"><span class="k">2026-07-12</span><span class="v">Registered instants (/v1/instants) now Ed25519-signed (§31); SDK gained monotonic() (§32), guardedNow() rollback detection (§33), offlineNow() degraded mode (§39), and a maxAgeMs staleness check in verifyInstant()</span></div>
  <div class="row"><span class="k">2026-07-11</span><span class="v">Constraint Planner, Semantic Resolution, Share Instant, Boundary Inspector, Temporal Groups — CommonInstant Web whitepaper P1–P6</span></div>
  <div class="row"><span class="k">2026-07-11</span><span class="v">Ed25519-signed instants (§31), native rate limiting (§38), table_lookup transform</span></div>
@@ -1064,7 +1115,7 @@ function toolDeclaration(origin) {
       { name: "list-systems", method: "GET", path: "/v1/systems", desc: "List all stored custom systems.", input: {}, output: "system ids" },
       { name: "transform-path", method: "GET", path: "/v1/path", desc: "Route between two systems/timescales in the transform graph (§13-14; star graph today).", input: { from: "system id or unix|utc|posix", to: "…" }, output: "path + hops + lossless" },
       { name: "create-group", method: "POST", path: "/v1/temporal-groups", desc: "Persist a Temporal Group — a named set of members (\"utc\"|\"posix\"|\"tai\"|\"gps\"|\"tz:<IANA>\"|<system id>). Re-posting the same id bumps its version.",
-        input: { id: "group:project-alpha", members: ["utc", "tz:Asia/Taipei", "user:game_world"], owner: "string?" }, output: "group record + expand URL" },
+        input: { id: "group:project-alpha", members: ["utc", "tz:Asia/Taipei", "user:game_world"], owner: "string?" }, output: "group record + expand URL + optional Ed25519 signature over this version (§31.1)" },
       { name: "get-group", method: "GET", path: "/v1/temporal-groups/{id}", desc: "Retrieve a Temporal Group definition.", input: { id: "string" }, output: "group record" },
       { name: "list-groups", method: "GET", path: "/v1/temporal-groups", desc: "List all stored Temporal Groups.", input: {}, output: "group ids" },
       { name: "expand-group", method: "POST", path: "/v1/temporal-groups/{id}/expand", desc: "THE CommonInstant Web flagship: project ONE instant across every member of a group — E(I*, G) = {τ1,...,τn}, \"One Instant, Many Systems\". Default instant is now; pass instant_id to align on a previously-registered I*, or an explicit value+encoding.",
@@ -1167,6 +1218,14 @@ async function ed25519SignFields(env, id, unixNs, timescale) {
 async function signSystemRecord(env, rec) {
   const canonical = rec.id + "|" + JSON.stringify({ parent: rec.parent, epoch: rec.epoch, rate: rec.rate, offset: rec.offset }) + "|" + rec.created_at;
   return ed25519SignMessage(env, canonical, "system_id|canonical_json(parent,epoch,rate,offset)|created_at");
+}
+// A Temporal Group re-posted under the same id bumps its version (§5.5) — each
+// version is functionally a distinct definition, so the signature is tied to
+// updated_at (which changes every version) rather than created_at (which does
+// not), and covers exactly the fields a re-post can change: members, owner, version.
+async function signGroupRecord(env, rec) {
+  const canonical = rec.id + "|" + JSON.stringify({ members: rec.members, owner: rec.owner, version: rec.version }) + "|" + rec.updated_at;
+  return ed25519SignMessage(env, canonical, "group_id|canonical_json(members,owner,version)|updated_at");
 }
 async function signInstant(env, inst) {
   const sig = await ed25519SignFields(env, inst.instant.id, inst.encodings.unix_ns, inst.instant.reference.timescale);
@@ -1505,7 +1564,7 @@ function aiManifest(origin) {
 const AI_VERSION_JSON = {
   manifest_version: "0.1", aicl_layer_version: "0.1", api_version: API_VERSION, release: "0.1",
   spec_version: "ctcl-v1", rights_spectrum_version: "0.1",
-  last_major_milestone: "Share Instant QR Code (§6.6) + custom-system signing (§31.1)",
+  last_major_milestone: "Share Instant QR Code (§6.6) + every persisted resource signed (§31.1) + leap-aware TAI/GPS",
   last_updated: "2026-07-14",
 };
 
@@ -1623,10 +1682,8 @@ live-rendered version of the same list:
 
 - custom_expression transform (arbitrary-expression eval — a deliberate security
   decision, not a gap to fill)
-- Full leap-aware TAI/GPS conversion (currently a flat +37s/+18s approximation)
 - Hard per-key rate limiting (today's limiter is Cloudflare's native, per-colo
   approximate mechanism; a hard guarantee needs a Durable Object)
-- Signing of Temporal Groups (instants, /v1/now, and custom systems are all signed; groups are not)
 - A source allowlist or app-level audit log (the API is read-only/query-only, so there
   is nothing external to allowlist; Cloudflare's own platform request logs are the only
   request log today)
@@ -1739,9 +1796,23 @@ something that looks like a QR code without a real scanner being able to read it
 failure mode invisible by code inspection alone. Verified before inclusion via an
 independent round-trip decode (jsQR) across representative payloads, not assumed safe
 because the source looked reasonable. Separately, custom system definitions
-(POST /v1/systems) are now Ed25519-signed the same way registered instants already
-were — §31.1's "signed transform metadata" control, closing that half of the gap;
-Temporal Groups remain unsigned.
+(POST /v1/systems) and, a little later the same day, Temporal Groups
+(POST /v1/temporal-groups) are now Ed25519-signed the same way registered instants
+already were — §31.1's "signed transform metadata" control, closing it completely:
+every persisted resource type this deployment offers is now signed. A group's
+signature is tied to updated_at rather than created_at, since re-posting the same id
+bumps its version (§5.5) and each version is a functionally distinct definition.
+
+Also closed the same day: tai/gps timescales were a flat current-day offset applied
+retroactively to every instant, which was quietly wrong for historical dates — a 1990
+instant got 2017's +37s TAI offset instead of 1990's true +25s. Replaced with the full
+IERS historical leap-second table (1972 through the last declared leap second,
+2017-01-01) so any past instant gets the offset that was actually true then. This does
+NOT and cannot predict a future undeclared leap second — nobody can, IERS gives only
+~6 months' notice — so post-2017 accuracy still depends on the table being kept
+current; none has been declared since 2017-01-01. Verified offline against known
+historical offsets (1975, 1990, 2000, the 1980-01-06 GPS epoch, and the pre-1972/
+pre-GPS-epoch clamp/not-applicable cases) before deploying.
 `;
 
 const CORPUS_CONCEPT_GENEALOGY_MD = `# Concept genealogy
@@ -1761,14 +1832,16 @@ concepts are not "coming soon" — they were considered and declined.
 
 ## Stable (implemented, trusted)
 
-- Timescales: utc, posix, tai (approximate), gps (approximate).
+- Timescales: utc, posix, tai (leap-aware for any past instant, full 1972-2017
+  table), gps (same, minus the fixed 19s TAI-GPS offset).
 - Encodings: unix_s, unix_ms, unix_us, unix_ns, rfc3339.
 - The instant envelope schema (see specs/instant-schema.json).
 - Custom temporal systems with rate.type constant, piecewise, paused, or table.
 - Temporal Groups and the group-expand operation.
 - The Boundary Inspector's status enum: normal, gap, fold, pause, rate_change.
-- Ed25519 signing of /v1/now, registered instants (/v1/instants), and custom system
-  definitions (/v1/systems). Temporal Groups are not signed — see engineering-notes.md.
+- Ed25519 signing of every persisted resource: /v1/now, registered instants
+  (/v1/instants), custom system definitions (/v1/systems), and Temporal Groups
+  (/v1/temporal-groups, re-signed on each version bump).
 - SDK-side monotonic duration timing, clock-rollback detection, and offline degraded
   mode (§32/§33/§39) — client-side concerns by the whitepaper's own definition, not
   server state.
@@ -1888,7 +1961,7 @@ const CORPUS_ACCEPTED_CONCEPTS_MD = `# Accepted concepts
 | Custom temporal systems (constant/piecewise/paused/table) | stable | 2026-07-11 |
 | Temporal Groups ("One Instant, Many Systems") | stable | 2026-07-11 |
 | Boundary Inspector (gap/fold/pause/rate_change) | stable | 2026-07-11 |
-| Ed25519 signing (/v1/now, /v1/instants, /v1/systems) | stable, partial scope | 2026-07-14 |
+| Ed25519 signing (/v1/now, /v1/instants, /v1/systems, /v1/temporal-groups) | stable | 2026-07-14 |
 | Semantic Resolution (place/alias to IANA) | stable, narrow scope | 2026-07-11 |
 | Constraint Planner (bounded window solver) | stable, narrow scope | 2026-07-11 |
 | Status/Trust Panel and Developer Console | stable | 2026-07-11 |
@@ -1896,6 +1969,7 @@ const CORPUS_ACCEPTED_CONCEPTS_MD = `# Accepted concepts
 | Apache License, Version 2.0 | frozen | 2026-07-12 |
 | SDK monotonic()/guardedNow()/offlineNow() (§32/§33/§39) | stable, client-side | 2026-07-12 |
 | Share Instant QR Code (§6.6) | stable | 2026-07-14 |
+| Leap-aware TAI/GPS (full 1972-2017 historical table) | stable, no future prediction | 2026-07-14 |
 `;
 
 const CORPUS_DEPRECATED_CONCEPTS_MD = `# Deprecated / superseded
@@ -1984,8 +2058,10 @@ This shape is frozen for API version v1 (see governance/versioning-policy.md).
 
 Encodings: unix_s, unix_ms, unix_us, unix_ns, rfc3339 (iso8601 accepted as an alias).
 Timescales: utc (civil reference, includes leap seconds), posix (unix time, leap
-seconds flattened), tai and gps (approximate — a flat +37s/+18s offset as of 2017-01-01,
-not a live leap table).
+seconds flattened), tai and gps (leap-aware for any past instant via the full
+1972-2017 historical offset table; cannot predict a future leap second not yet
+declared, so post-2017 accuracy depends on the table staying current — none has
+been declared since 2017-01-01).
 
 ## MUST / SHOULD
 
@@ -2077,6 +2153,7 @@ const SPECS_GROUP_SCHEMA = {
     members: { type: "array", items: { type: "string" }, description: "each item is \"utc\"|\"posix\"|\"tai\"|\"gps\" (builtin), \"tz:<IANA>\" (civil local time), or a stored custom system id" },
     owner: { type: ["string", "null"] },
     version: { type: "string", description: "auto-incremented on every re-POST of the same id" },
+    signature: { type: "object", description: "present only when CTCL_SIGN_KEY is configured; Ed25519 over id|canonical_json(members,owner,version)|updated_at (§31.1), re-signed on every version bump", properties: { alg: { const: "Ed25519" }, key_id: { type: "string" }, signed_fields: { type: "string" }, value: { type: "string" }, verify: { type: "string" } } },
   },
 };
 
@@ -2500,8 +2577,8 @@ export default {
     if (p === "/v1/timescales") return ok({ timescales: [
       { id: "utc", type: "reference", note: "Civil reference; includes leap seconds." },
       { id: "posix", type: "encoding", note: "Unix time; POSIX ignores leap seconds." },
-      { id: "tai", type: "reference", note: `Atomic; ≈ UTC + ${LEAP.tai_minus_utc_s}s (${LEAP.as_of}). Offset caveat applies.` },
-      { id: "gps", type: "reference", note: `≈ UTC + ${LEAP.gps_minus_utc_s}s (${LEAP.as_of}). Offset caveat applies.` },
+      { id: "tai", type: "reference", note: `Atomic; leap-aware for any instant via the 1972-2017 historical offset table (currently +${LEAP.tai_minus_utc_s}s, latest known offset as of ${LEAP.as_of}). Cannot predict an undeclared future leap second.` },
+      { id: "gps", type: "reference", note: `Leap-aware like tai, minus a fixed 19s (currently +${LEAP.gps_minus_utc_s}s). Not applicable before the 1980-01-06 GPS epoch.` },
     ], leap_table: LEAP });
     if (p === "/v1/encodings") return ok({ encodings: [
       "unix_s", "unix_ms", "unix_us", "unix_ns", "rfc3339", "iso8601",

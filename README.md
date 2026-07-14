@@ -100,12 +100,15 @@ registered instants (`/v1/instants`) are now Ed25519-signed (not just `/v1/now`)
 SDK gained `monotonic()` (§32 duration timer immune to wall-clock jumps), `guardedNow()`
 (§33 `CLOCK_ROLLBACK_DETECTED` warning), `offlineNow()` (§39 cached extrapolation,
 `quality.mode: "offline_degraded"` instead of throwing), and a `maxAgeMs` staleness check
-in `verifyInstant()`. **§31.1 + §6.6 closed 2026-07-14**: custom system definitions
-(`POST /v1/systems`) are now Ed25519-signed too ("signed transform metadata"), and the
-Share Instant page (`/i/{id}`) renders a server-side QR Code. Remaining: `custom_expression`
-transform (intentionally unimplemented — arbitrary-expression eval is a security risk);
-signing Temporal Groups; hard rate limits via Durable Object; trust elevation (T3/T4);
-simulation / robotics / digital-twin adapters; full leap-aware TAI/GPS conversion.
+in `verifyInstant()`. **§31.1 + §6.6 + §16 closed 2026-07-14**: every persisted resource
+type (`/v1/instants`, `/v1/systems`, `/v1/temporal-groups`) is now Ed25519-signed
+("signed transform metadata"); the Share Instant page (`/i/{id}`) renders a server-side
+QR Code; and `tai`/`gps` timescales now use the full 1972-2017 historical leap-second
+table instead of a flat current-day offset, so a historical instant gets the offset
+that was actually true then (a future undeclared leap second still can't be predicted —
+nobody can). Remaining: `custom_expression` transform (intentionally unimplemented —
+arbitrary-expression eval is a security risk); hard rate limits via Durable Object;
+trust elevation (T3/T4); simulation / robotics / digital-twin adapters.
 
 CommonInstant Web whitepaper progress: P0 (schema/versioning/error-model stabilization) was
 already satisfied by the API whitepaper work above. **P1 — Temporal Groups ("One Instant,
@@ -190,6 +193,12 @@ renders a server-side QR Code (§6.6) of its own share URL — the project's fir
 third-party dependency (a well-known MIT-licensed QR encoder, inlined verbatim, round-trip
 verified via an independent decoder before inclusion since a subtly-wrong hand-rolled
 Reed-Solomon implementation would look right without a real scanner being able to read
-it). Separately, `POST /v1/systems` now signs the whole definition (parent/epoch/rate/
-offset) with the same Ed25519 key used for instants — §31.1's "signed transform metadata"
-control.
+it). Separately, `POST /v1/systems` and `POST /v1/temporal-groups` now sign their whole
+definitions with the same Ed25519 key used for instants — §31.1's "signed transform
+metadata" control, closed completely: every persisted resource type is now signed.
+And `tai`/`gps` timescales switched from a flat current-day offset (which was quietly
+wrong for historical instants — a 1990 date got 2017's +37s instead of 1990's true
++25s) to the full 1972-2017 IERS historical leap-second table, verified against known
+historical offsets before deploying. This still can't predict a future undeclared leap
+second — nobody can, IERS gives ~6 months' notice — so post-2017 accuracy depends on
+the table staying current; none has been declared since 2017-01-01.
