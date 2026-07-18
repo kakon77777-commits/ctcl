@@ -358,6 +358,8 @@ async function runtimeHealth(env) {
     rate_limiter: rateLimit,
     instant_signing: signKey ? `enabled (Ed25519, key_id ${KEY_ID})` : "disabled (CTCL_SIGN_KEY unset)",
     edge_wall_clock: "operational",
+    oauth_google: (env && env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) ? "enabled" : "disabled (GOOGLE_CLIENT_ID/SECRET unset)",
+    oauth_github: (env && env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET) ? "enabled" : "disabled (GITHUB_CLIENT_ID/SECRET unset)",
   };
 }
 const KNOWN_LIMITATIONS = [
@@ -369,7 +371,8 @@ const KNOWN_LIMITATIONS = [
   "no source allowlist or app-level audit log (§31.1) — the API is read-only/query-only (nothing external is ingested to allowlist), and Cloudflare's platform request logs are the only request log today",
   "gpu_availability and simulation_state planner constraints require an external data feed this deployment does not have",
   "no CLI or webhook relay yet — REST, SDK, and the web playground are the only interfaces today",
-  "Shared Workspaces (/v1/workspaces, Phase 5 Step 1) have NO accounts and NO access control — anyone who can reach this API can read/overwrite any workspace, same public-write model as every other resource; real role permissions would need actual accounts, deliberately not built",
+  "Accounts (§Phase-5 Step 2, Google/GitHub sign-in) exist ONLY to make Shared Workspace ownership real — one role (owner vs. everyone else), not general RBAC. Instants, custom systems, Temporal Groups, and unowned/anonymous workspaces remain exactly as accountless and open as they always were; signing in is opt-in protection, never required",
+  "no email/password sign-in, no account merging across providers if the same person's email differs between Google and GitHub, no account deletion endpoint yet — this is a minimal accounts layer, not a full identity platform",
 ];
 function versionInfo(env) {
   return runtimeHealth(env).then((runtime) => ok({
@@ -591,9 +594,17 @@ async function createWorkspace(req, env) {
   if (!systems.length && !groups.length) return fail("INVALID_TIME_VALUE", "workspace needs at least one system or group id, in systems[] and/or groups[]");
   const existingRaw = await env.CTCL_KV.get("workspace:" + wsp.id);
   const existing = existingRaw ? JSON.parse(existingRaw) : null;
+  // §Phase-5 Step 2 ownership: an owned workspace can only be modified by its
+  // owner. An unowned workspace (created before accounts existed, or by
+  // someone who chose not to sign in) stays exactly as open as Step 1's
+  // original behavior - signing in is opt-in protection, not a requirement.
+  const user = await getCurrentUser(req, env);
+  if (existing && existing.owner && (!user || user.id !== existing.owner)) {
+    return fail("FORBIDDEN", "this workspace is owned by another account — sign in as the owner to modify it", {}, 403);
+  }
   const rec = {
     id: wsp.id, name: wsp.name || (existing && existing.name) || null,
-    systems, groups, owner: wsp.owner || (existing && existing.owner) || null,
+    systems, groups, owner: existing ? existing.owner : (user ? user.id : null),
     version: String(existing ? Number(existing.version || "1") + 1 : 1),
     created_at: existing ? existing.created_at : new Date().toISOString(),
     updated_at: new Date().toISOString(),
@@ -651,6 +662,181 @@ async function expandWorkspace(id, req, env) {
     instant: { source, unix_ns: ns.toString(), rfc3339: rfc3339(ns, "UTC") },
     systems, groups,
   }, {}, "no-store");
+}
+
+// ---- Phase 5 Step 2 — Accounts (Google/GitHub OAuth), sessions, workspace
+// ownership. Scoped deliberately narrow: this exists to make Shared Workspace
+// ownership real (§Phase-5 "role permissions" MVP — one role, owner-vs-anyone,
+// not a full RBAC system), not to become a general identity platform. Systems,
+// Groups, and instants stay exactly as open/accountless as they always were —
+// only workspace WRITES are affected, and only for workspaces that already have
+// an owner (an anonymous, unowned workspace stays fully open, preserving Step
+// 1's behavior for anyone who doesn't want to sign in).
+//
+// KV layout: user:<id> (profile + linked providers), oauth_identity:<provider>:
+// <external_id> -> user id (login lookup), session:<token> -> {user_id,
+// created_at} (KV expirationTtl handles expiry, no manual cleanup needed),
+// oauth_state:<state> -> {provider, redirect_after} (short TTL, one-time use,
+// the actual CSRF defense).
+const OAUTH_PROVIDERS = {
+  google: {
+    authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+    tokenUrl: "https://oauth2.googleapis.com/token",
+    userInfoUrl: "https://www.googleapis.com/oauth2/v3/userinfo",
+    scope: "openid email profile",
+    clientIdEnv: "GOOGLE_CLIENT_ID", clientSecretEnv: "GOOGLE_CLIENT_SECRET",
+    extraAuthParams: { access_type: "online", prompt: "select_account" },
+    parseUser: (info) => ({ external_id: info.sub, email: info.email || null, name: info.name || null, avatar_url: info.picture || null }),
+  },
+  github: {
+    authorizeUrl: "https://github.com/login/oauth/authorize",
+    tokenUrl: "https://github.com/login/oauth/access_token",
+    userInfoUrl: "https://api.github.com/user",
+    scope: "read:user user:email",
+    clientIdEnv: "GITHUB_CLIENT_ID", clientSecretEnv: "GITHUB_CLIENT_SECRET",
+    extraAuthParams: {},
+    parseUser: (info) => ({ external_id: String(info.id), email: info.email || null, name: info.name || info.login || null, avatar_url: info.avatar_url || null }),
+  },
+};
+const SESSION_COOKIE = "ctcl_session";
+const SESSION_TTL_S = 60 * 60 * 24 * 30; // 30 days
+const OAUTH_STATE_TTL_S = 600; // 10 minutes - just long enough for a real login, short enough to bound CSRF-window/KV growth
+
+function randomToken() {
+  return crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
+}
+function parseCookies(req) {
+  const header = req.headers.get("Cookie") || "";
+  const out = {};
+  for (const part of header.split(";")) {
+    const i = part.indexOf("=");
+    if (i === -1) continue;
+    const k = part.slice(0, i).trim(), v = part.slice(i + 1).trim();
+    if (k) out[k] = decodeURIComponent(v);
+  }
+  return out;
+}
+function sessionCookieHeader(value, maxAgeS) {
+  const attrs = [`${SESSION_COOKIE}=${encodeURIComponent(value)}`, "Path=/", "HttpOnly", "Secure", "SameSite=Lax"];
+  attrs.push(`Max-Age=${maxAgeS != null ? maxAgeS : 0}`);
+  return attrs.join("; ");
+}
+function jsonRespWithCookie(bodyObj, cookieHeader, status = 200) {
+  return new Response(JSON.stringify(bodyObj, null, 2) + "\n",
+    { status, headers: { "Content-Type": "application/json; charset=utf-8", ...CORS, "Set-Cookie": cookieHeader } });
+}
+
+async function getCurrentUser(req, env) {
+  if (!env || !env.CTCL_KV) return null;
+  const token = parseCookies(req)[SESSION_COOKIE];
+  if (!token) return null;
+  const sessionRaw = await env.CTCL_KV.get("session:" + token);
+  if (!sessionRaw) return null;
+  const userRaw = await env.CTCL_KV.get("user:" + JSON.parse(sessionRaw).user_id);
+  return userRaw ? JSON.parse(userRaw) : null;
+}
+
+async function oauthStart(providerKey, req, env) {
+  const provider = OAUTH_PROVIDERS[providerKey];
+  if (!provider) return fail("UNKNOWN_PROVIDER", `no such auth provider: ${providerKey}`, {}, 404);
+  if (!env || !env.CTCL_KV) return kvMissing();
+  const clientId = env[provider.clientIdEnv];
+  if (!clientId) return fail("AUTH_DISABLED", `${providerKey} sign-in is not configured on this deployment (missing ${provider.clientIdEnv})`, {}, 503);
+  const url = new URL(req.url);
+  const state = randomToken();
+  await env.CTCL_KV.put("oauth_state:" + state,
+    JSON.stringify({ provider: providerKey, redirect_after: url.searchParams.get("redirect") || "/", created_at: new Date().toISOString() }),
+    { expirationTtl: OAUTH_STATE_TTL_S });
+  const authUrl = new URL(provider.authorizeUrl);
+  authUrl.searchParams.set("client_id", clientId);
+  authUrl.searchParams.set("redirect_uri", url.origin + "/auth/" + providerKey + "/callback");
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("scope", provider.scope);
+  authUrl.searchParams.set("state", state);
+  for (const [k, v] of Object.entries(provider.extraAuthParams)) authUrl.searchParams.set(k, v);
+  return Response.redirect(authUrl.toString(), 302);
+}
+
+async function oauthCallback(providerKey, req, env) {
+  const provider = OAUTH_PROVIDERS[providerKey];
+  if (!provider) return fail("UNKNOWN_PROVIDER", `no such auth provider: ${providerKey}`, {}, 404);
+  if (!env || !env.CTCL_KV) return kvMissing();
+  const clientId = env[provider.clientIdEnv], clientSecret = env[provider.clientSecretEnv];
+  if (!clientId || !clientSecret) return fail("AUTH_DISABLED", `${providerKey} sign-in is not configured on this deployment`, {}, 503);
+
+  const url = new URL(req.url);
+  const errorParam = url.searchParams.get("error");
+  if (errorParam) return fail("AUTH_DENIED", `${providerKey} returned an error: ${errorParam}`, {}, 400);
+  const code = url.searchParams.get("code"), state = url.searchParams.get("state");
+  if (!code || !state) return fail("INVALID_TIME_VALUE", "missing code or state in callback", {}, 400);
+
+  // §31.1-style CSRF defense: state must be one we minted, and is single-use.
+  const stateRaw = await env.CTCL_KV.get("oauth_state:" + state);
+  if (!stateRaw) return fail("AUTH_STATE_INVALID", "unknown or expired state — the login link was already used, expired (10 min), or this is a forged callback", {}, 400);
+  await env.CTCL_KV.delete("oauth_state:" + state);
+  const stateData = JSON.parse(stateRaw);
+  if (stateData.provider !== providerKey) return fail("AUTH_STATE_INVALID", "state was minted for a different provider", {}, 400);
+
+  let tokenJson, info;
+  try {
+    const tokenRes = await fetch(provider.tokenUrl, {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "accept": "application/json" },
+      body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, code, redirect_uri: url.origin + "/auth/" + providerKey + "/callback", grant_type: "authorization_code" }),
+    });
+    if (!tokenRes.ok) return fail("AUTH_PROVIDER_ERROR", `${providerKey} token exchange failed: HTTP ${tokenRes.status}`, {}, 502);
+    tokenJson = await tokenRes.json();
+    if (!tokenJson.access_token) return fail("AUTH_PROVIDER_ERROR", `${providerKey} did not return an access_token`, { provider_response: tokenJson.error || null }, 502);
+    const infoRes = await fetch(provider.userInfoUrl, { headers: { "Authorization": "Bearer " + tokenJson.access_token, "User-Agent": "CTCL/0.1 (+https://commoninstant.org)" } });
+    if (!infoRes.ok) return fail("AUTH_PROVIDER_ERROR", `${providerKey} userinfo fetch failed: HTTP ${infoRes.status}`, {}, 502);
+    info = await infoRes.json();
+  } catch (e) {
+    return fail("AUTH_PROVIDER_ERROR", `${providerKey} sign-in failed: ${String(e)}`, {}, 502);
+  }
+
+  const parsed = provider.parseUser(info);
+  if (providerKey === "github" && !parsed.email) {
+    // GitHub only includes email in /user if it's public; fall back to the
+    // dedicated emails endpoint for the verified primary address.
+    try {
+      const emailsRes = await fetch("https://api.github.com/user/emails", { headers: { "Authorization": "Bearer " + tokenJson.access_token, "User-Agent": "CTCL/0.1 (+https://commoninstant.org)" } });
+      if (emailsRes.ok) {
+        const emails = await emailsRes.json();
+        const primary = (Array.isArray(emails) && (emails.find((e) => e.primary && e.verified) || emails.find((e) => e.verified))) || null;
+        if (primary) parsed.email = primary.email;
+      }
+    } catch (e) { /* best-effort - proceed without email rather than failing login */ }
+  }
+  if (!parsed.external_id) return fail("AUTH_PROVIDER_ERROR", `${providerKey} did not return a usable account id`, {}, 502);
+
+  const identityKey = "oauth_identity:" + providerKey + ":" + parsed.external_id;
+  const existingUserId = await env.CTCL_KV.get(identityKey);
+  let user = existingUserId ? JSON.parse((await env.CTCL_KV.get("user:" + existingUserId)) || "null") : null;
+  const userId = user ? user.id : "user_" + crypto.randomUUID();
+  if (!user) user = { id: userId, email: null, name: null, avatar_url: null, providers: {}, created_at: new Date().toISOString() };
+  user.providers[providerKey] = { external_id: parsed.external_id, linked_at: new Date().toISOString() };
+  if (parsed.name) user.name = parsed.name;
+  if (parsed.avatar_url) user.avatar_url = parsed.avatar_url;
+  if (parsed.email) user.email = parsed.email;
+  user.updated_at = new Date().toISOString();
+
+  await env.CTCL_KV.put("user:" + userId, JSON.stringify(user));
+  await env.CTCL_KV.put(identityKey, userId);
+
+  const sessionToken = randomToken();
+  await env.CTCL_KV.put("session:" + sessionToken, JSON.stringify({ user_id: userId, created_at: new Date().toISOString() }), { expirationTtl: SESSION_TTL_S });
+
+  return new Response(null, { status: 302, headers: { Location: stateData.redirect_after || "/", "Set-Cookie": sessionCookieHeader(sessionToken, SESSION_TTL_S), ...CORS } });
+}
+
+async function handleAuthMe(req, env) {
+  const user = await getCurrentUser(req, env);
+  if (!user) return fail("NOT_AUTHENTICATED", "no active session — sign in via /auth/google/start or /auth/github/start", {}, 401);
+  return ok({ id: user.id, email: user.email, name: user.name, avatar_url: user.avatar_url, providers: Object.keys(user.providers), created_at: user.created_at });
+}
+async function handleLogout(req, env) {
+  const token = parseCookies(req)[SESSION_COOKIE];
+  if (token && env && env.CTCL_KV) await env.CTCL_KV.delete("session:" + token);
+  return jsonRespWithCookie({ ok: true, data: { logged_out: true }, meta: { api_version: API_VERSION, request_id: rid() } }, sessionCookieHeader("", null));
 }
 
 // ---- Boundary Inspector (P2 — CommonInstant Web whitepaper §5.6/§8.1) -----
@@ -836,7 +1022,7 @@ $('copyJson').addEventListener('click',async function(){var t=await(await fetch(
 // exists (GET /v1/version's runtime health block; the error codes and endpoints already
 // wired elsewhere). Reuses shareStyles() for visual consistency with /i/{id}.
 function siteNav(active) {
-  const items = [["/", "Home"], ["/developers", "Developers"], ["/status", "Status"]];
+  const items = [["/", "Home"], ["/developers", "Developers"], ["/status", "Status"], ["/account", "Account"]];
   return items.map(([href, label]) => `<a href="${href}"${href === active ? ' style="color:var(--ink);font-weight:600"' : ""}>${label}</a>`).join(" &middot; ");
 }
 const ERROR_CODES = [
@@ -849,6 +1035,13 @@ const ERROR_CODES = [
   ["UNKNOWN_SYSTEM", 404, "no such custom system id"],
   ["UNKNOWN_GROUP", 404, "no such Temporal Group id"],
   ["UNKNOWN_WORKSPACE", 404, "no such Shared Workspace id"],
+  ["UNKNOWN_PROVIDER", 404, "no such OAuth sign-in provider"],
+  ["AUTH_DISABLED", 503, "this deployment has no client id/secret configured for that provider"],
+  ["AUTH_DENIED", 400, "the sign-in provider returned an error (e.g. the user cancelled)"],
+  ["AUTH_STATE_INVALID", 400, "OAuth state missing/expired/reused — restart the sign-in flow"],
+  ["AUTH_PROVIDER_ERROR", 502, "the OAuth provider's token or userinfo endpoint failed"],
+  ["NOT_AUTHENTICATED", 401, "no active session — sign in first"],
+  ["FORBIDDEN", 403, "authenticated, but not the owner of this resource"],
   ["UNKNOWN_INSTANT", 404, "no such registered instant id"],
   ["UNKNOWN_TRANSFORM", 404, "no such transform type id"],
   ["REGISTRY_UNAVAILABLE", 503, "CTCL_KV not bound on this deployment"],
@@ -920,7 +1113,7 @@ function developerConsolePage() {
 
 <h2 style="font-size:1.05rem;margin-top:1.6rem">Changelog</h2>
 <div class="card">
- <div class="row"><span class="k">2026-07-14</span><span class="v">Shared Workspaces (/v1/workspaces, Phase 5 Step 1) — bundle systems/groups under one signed, shareable id, no accounts; QR Code on Share Instant (§6.6); every persisted resource type Ed25519-signed (§31.1); tai/gps timescales now leap-aware via the full 1972-2017 historical offset table</span></div>
+ <div class="row"><span class="k">2026-07-14</span><span class="v">Shared Workspaces (/v1/workspaces) + Google/GitHub sign-in (§Phase 5) — owned workspaces are protected, everything else stays accountless; QR Code on Share Instant (§6.6); every persisted resource type Ed25519-signed (§31.1); tai/gps timescales now leap-aware via the full 1972-2017 historical offset table</span></div>
  <div class="row"><span class="k">2026-07-12</span><span class="v">Registered instants (/v1/instants) now Ed25519-signed (§31); SDK gained monotonic() (§32), guardedNow() rollback detection (§33), offlineNow() degraded mode (§39), and a maxAgeMs staleness check in verifyInstant()</span></div>
  <div class="row"><span class="k">2026-07-11</span><span class="v">Constraint Planner, Semantic Resolution, Share Instant, Boundary Inspector, Temporal Groups — CommonInstant Web whitepaper P1–P6</span></div>
  <div class="row"><span class="k">2026-07-11</span><span class="v">Ed25519-signed instants (§31), native rate limiting (§38), table_lookup transform</span></div>
@@ -931,6 +1124,57 @@ function developerConsolePage() {
 <div class="actions"><a class="btn" href="/v1/version">raw version JSON</a></div>
 <footer>CTCL v0.1 &middot; a reference + transformation layer, not a timing authority. <a href="/">&larr; home</a></footer>
 </div>
+</body></html>`;
+}
+
+// ---- Account (Phase 5 Step 2) — sign in with Google/GitHub, see who you are,
+// sign out. Deliberately NOT a workspace-management dashboard (that stays
+// API-only for now, GET /v1/workspaces/{id} etc.) - this page's only job is
+// establishing/inspecting the session that makes workspace ownership real.
+function accountPage() {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CTCL · Account</title>
+<meta name="description" content="Sign in to CTCL with Google or GitHub - only needed if you want owned, protected Shared Workspaces.">
+<style>${shareStyles()}</style></head><body><div class="wrap">
+<div class="eyebrow">CTCL &middot; Account</div>
+<h1>Sign in</h1>
+<p style="color:var(--dim)">Only needed if you want a <strong>Shared Workspace</strong> that only you can modify (§Phase 5 Step 2). Everything else on CTCL — instants, custom systems, Temporal Groups, unowned workspaces — has never required an account and still doesn't.</p>
+<nav style="margin:1rem 0 1.6rem;font:600 .8rem/1 var(--mono)">${siteNav("/account")}</nav>
+<div class="card"><div id="state">loading…</div></div>
+<footer>CTCL v0.1 &middot; a reference + transformation layer, not a timing authority. <a href="/">&larr; home</a></footer>
+</div>
+<script>
+(async function(){
+  var el = document.getElementById('state');
+  try {
+    var r = await fetch('/auth/me', { credentials: 'same-origin' });
+    var j = await r.json();
+    if (j.ok) {
+      var u = j.data;
+      el.innerHTML =
+        '<div class="row"><span class="k">signed in as</span><span class="v">' + (u.name || u.email || u.id) + '</span></div>' +
+        (u.email ? '<div class="row"><span class="k">email</span><span class="v">' + u.email + '</span></div>' : '') +
+        '<div class="row"><span class="k">providers</span><span class="v">' + u.providers.join(', ') + '</span></div>' +
+        '<div class="row"><span class="k">account id</span><span class="v">' + u.id + '</span></div>';
+      var btn = document.createElement('button');
+      btn.className = 'btn pri'; btn.style.marginTop = '1rem'; btn.textContent = 'sign out';
+      btn.addEventListener('click', async function () {
+        await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' });
+        location.reload();
+      });
+      el.parentNode.appendChild(btn);
+    } else {
+      el.innerHTML = '<p style="margin:0 0 1rem;color:var(--dim)">Not signed in.</p>' +
+        '<div class="actions">' +
+        '<a class="btn pri" href="/auth/google/start?redirect=/account">sign in with Google</a>' +
+        '<a class="btn pri" href="/auth/github/start?redirect=/account">sign in with GitHub</a>' +
+        '</div>';
+    }
+  } catch (e) {
+    el.textContent = 'failed to load: ' + e;
+  }
+})();
+</script>
 </body></html>`;
 }
 
@@ -1214,6 +1458,10 @@ function toolDeclaration(origin) {
       { name: "list-workspaces", method: "GET", path: "/v1/workspaces", desc: "List all stored Shared Workspaces.", input: {}, output: "workspace ids" },
       { name: "expand-workspace", method: "POST", path: "/v1/workspaces/{id}/expand", desc: "Resolve every member system AND every member group's members, all at one shared instant, in a single call — a workspace-scoped generalization of expand-group. Default instant is now; pass instant_id or an explicit value+encoding.",
         input: { instant_id: "string?", value: "string?", encoding: "string?" }, output: "instant + systems[] + groups[] (each group carries its own resolved members[])" },
+      { name: "get-current-user", method: "GET", path: "/auth/me", desc: "Phase 5 Step 2 — read the caller's own account, if the ctcl_session cookie identifies an active session (browser-only; requires a prior human sign-in via /auth/google/start or /auth/github/start, there is no programmatic/agent login). 401 if not signed in.",
+        input: {}, output: "id + email + name + avatar_url + providers[] + created_at" },
+      { name: "sign-in", method: "GET", path: "/auth/{provider}/start", desc: "Browser-only redirect into Google or GitHub's OAuth consent screen (provider = google|github). Not an API call an agent makes directly — a human follows this link, then lands back with a session cookie. Exists solely to make Shared Workspace ownership (§Phase 5) real; nothing else on CTCL requires it.",
+        input: { provider: "google|github (path)", redirect: "string? (path to return to after sign-in, default /)" }, output: "302 redirect" },
       { name: "inspect-boundary", method: "POST", path: "/v1/boundaries/inspect", desc: "Proactive pre-flight check (§5.6): is this local time / custom-system state safe? Unlike /v1/convert, never errors — always returns a status: normal|gap|fold (timezone) or normal|pause|rate_change (system), plus upcoming DST transitions within a window.",
         input: { timezone: "IANA?", local_value: "naive local datetime string?", window_hours: "number? (default 48)" }, input_alt: { system_id: "string?", value: "string?", encoding: "string?" }, output: "status + safe + detail" },
       { name: "resolve-temporal-context", method: "POST", path: "/v1/resolve", desc: "resolve_temporal_context (§6): map an ambiguous input (city name, common alias, tz abbreviation) to IANA timezone candidates with confidence. NEVER silently picks one when genuinely ambiguous (e.g. \"CST\"). Free-form natural-language time phrases are explicitly out of scope — honest empty result, not a guess.",
@@ -1259,6 +1507,11 @@ function openapi(origin) {
       "/v1/workspaces": { get: { summary: "List Shared Workspaces (Phase 5 Step 1, no accounts)", responses: { 200: { description: "ok" } } }, post: { summary: "Create/update a Shared Workspace", responses: { 200: { description: "ok" } } } },
       "/v1/workspaces/{id}": { get: { summary: "Get a Shared Workspace definition", responses: { 200: { description: "ok" }, 404: { description: "unknown workspace" } } } },
       "/v1/workspaces/{id}/expand": { post: { summary: "Resolve every member system and group at one shared instant", responses: { 200: { description: "ok" }, 404: { description: "unknown workspace/instant" } } } },
+      "/auth/{provider}/start": { get: { summary: "Browser-only: redirect into Google/GitHub OAuth (Phase 5 Step 2)", responses: { 302: { description: "redirect to provider" }, 503: { description: "provider not configured" } } } },
+      "/auth/{provider}/callback": { get: { summary: "OAuth callback - exchanges code for a session cookie", responses: { 302: { description: "redirect back, Set-Cookie" }, 400: { description: "bad/expired state" } } } },
+      "/auth/me": { get: { summary: "Current session's account, if any", responses: { 200: { description: "ok" }, 401: { description: "not signed in" } } } },
+      "/auth/logout": { post: { summary: "Clear the current session", responses: { 200: { description: "ok" } } } },
+      "/account": { get: { summary: "Human sign-in page (HTML, not JSON)", responses: { 200: { description: "ok (html)" } } } },
       "/v1/boundaries/inspect": { post: { summary: "Boundary Inspector (§5.6): proactive gap/fold/pause/rate_change status check", responses: { 200: { description: "ok" } } } },
       "/v1/resolve": { post: { summary: "resolve_temporal_context (§6): ambiguous input -> IANA candidates with confidence", responses: { 200: { description: "ok" } } } },
       "/v1/planner/shared-instant": { post: { summary: "plan_shared_instant (§7): constraint-solve for a best shared instant", responses: { 200: { description: "ok" }, 400: { description: "window/constraints invalid" } } } },
@@ -1677,7 +1930,7 @@ function aiManifest(origin) {
 const AI_VERSION_JSON = {
   manifest_version: "0.1", aicl_layer_version: "0.1", api_version: API_VERSION, release: "0.1",
   spec_version: "ctcl-v1", rights_spectrum_version: "0.1",
-  last_major_milestone: "Shared Workspaces (Phase 5 Step 1, no accounts) + Share Instant QR Code + every persisted resource signed (§31.1) + leap-aware TAI/GPS",
+  last_major_milestone: "Shared Workspaces + Google/GitHub sign-in (Phase 5 Steps 1-2) + Share Instant QR Code + every persisted resource signed (§31.1) + leap-aware TAI/GPS",
   last_updated: "2026-07-14",
 };
 
@@ -1779,11 +2032,15 @@ is ever missing.
 - Temporal Groups: POST and GET /v1/temporal-groups, POST /v1/temporal-groups/{id}/expand
   — "One Instant, Many Systems," CTCL's flagship differentiator: project one instant
   across every member of a named, versioned group in a single call.
-- Shared Workspaces (Phase 5 Step 1): POST and GET /v1/workspaces, POST
+- Shared Workspaces (Phase 5): POST and GET /v1/workspaces, POST
   /v1/workspaces/{id}/expand — bundle existing system/group ids under one
-  shareable, versioned, signed id for team/multi-agent coordination. Deliberately
-  NO accounts and NO access control (see "What is honestly NOT implemented"
-  below) — a namespacing convenience, not an auth boundary.
+  shareable, versioned, signed id for team/multi-agent coordination.
+- Accounts (Phase 5 Step 2): GET/POST /auth/{google,github}/{start,callback},
+  GET /auth/me, POST /auth/logout, the human /account page. Sign-in with Google
+  or GitHub is entirely OPTIONAL and exists for exactly one reason: it makes a
+  Shared Workspace's owner field real, so only the creator can modify it
+  afterward. Nothing else on CTCL checks for a session — a workspace created
+  without signing in stays exactly as open as it was in Step 1.
 - Boundary Inspector: POST /v1/boundaries/inspect — proactive gap/fold/pause/rate_change
   status check that never errors (unlike /v1/convert).
 - Semantic Resolution: POST /v1/resolve — ambiguous place/alias/abbreviation input to
@@ -1805,8 +2062,10 @@ live-rendered version of the same list:
 - A source allowlist or app-level audit log (the API is read-only/query-only, so there
   is nothing external to allowlist; Cloudflare's own platform request logs are the only
   request log today)
-- Accounts and role permissions for Shared Workspaces (Phase 5's own "Step 2" —
-  deliberately deferred; Step 1 ships the namespacing/bundling half only)
+- Email/password sign-in, cross-provider account merging (a person who signs in
+  with Google then GitHub using a different email gets two separate accounts,
+  not one), account deletion, and any role beyond a single "owner" — this is a
+  minimal accounts layer built for one purpose, not a general identity platform
 - gpu_availability and simulation_state planner constraints (no external data feed)
 - A live MCP server, a CLI, a webhook relay
 
@@ -1959,6 +2218,40 @@ this API has no accounts, so anyone who can reach it can already read or overwri
 any system or group by id, and a workspace is exactly as public. It is a namespacing
 convenience (a discoverable "everything for project X" bundle), not access control.
 Real role permissions are Phase 5's own "Step 2," explicitly not started.
+
+## 2026-07-14 (same day, continued) — Phase 5 Step 2: Google/GitHub sign-in
+
+Neo.K asked directly for "the usual login methods — Google, Facebook, etc.," then
+narrowed it to one provider to start; the answer was Google and GitHub together
+(GitHub fitting CTCL's own developer/agent-builder audience, given every related
+repository already lives there). Shipped GET /auth/{google,github}/{start,callback},
+GET /auth/me, POST /auth/logout, and a minimal human /account page — session cookies
+(HttpOnly, Secure, SameSite=Lax, 30-day KV-backed expiry), CSRF-defended via a
+one-time, 10-minute state token. Both providers share one OAuth2 implementation
+(authorize-url construction, code exchange, userinfo fetch) parameterized per
+provider rather than two near-duplicate flows, plus a GitHub-specific fallback to
+the /user/emails endpoint when the primary /user response omits a public email.
+
+The one thing this exists for: making a Shared Workspace's owner field real.
+Creating a workspace while signed in sets its owner to your account; re-posting an
+owned workspace now requires being that same account (403 FORBIDDEN otherwise) — the
+one piece of §Phase-5 "role permissions" actually needed right now, not a full
+role hierarchy. A client-supplied owner field in the request body is ignored
+entirely (ownership can only come from a real session), closing what would
+otherwise have been a privilege-escalation gap the moment enforcement became real.
+Unowned workspaces, and every other resource type on CTCL, remain exactly as
+accountless as before — signing in is opt-in, never required.
+
+Because Google Cloud Console and GitHub's OAuth App registration both require Neo's
+own developer-account ownership (an agent creating third-party app registrations
+under someone else's identity is out of scope, both as policy and because someone
+has to own that registration long-term), the client id/secret pairs are his to
+generate and hand over — the secrets go straight into Cloudflare via \`wrangler
+secret put\`, mirroring exactly how CTCL_SIGN_KEY was handled, never through chat.
+The whole flow was built and tested (state/CSRF, cookie parsing, ownership
+enforcement against real seeded KV sessions, spoofed-owner rejection) before either
+provider's real credentials existed, so wiring the real ones in is the last step,
+not a precondition for reviewing the design.
 `;
 
 const CORPUS_CONCEPT_GENEALOGY_MD = `# Concept genealogy
@@ -2002,11 +2295,14 @@ concepts are not "coming soon" — they were considered and declined.
   not by oversight — see engineering-notes.md.
 - The Constraint Planner (plan_shared_instant): a bounded demonstration of
   constraint-based instant solving, explicitly not a full meeting-scheduler product.
-- Shared Workspaces (/v1/workspaces, Phase 5 Step 1): a namespacing/bundling
-  layer only. Deliberately ships with NO accounts and NO access control — the
-  scope is "knowing the id lets you coordinate," not "knowing the id is a
-  credential." Real role permissions are an explicit later step, not implied by
-  this one.
+- Shared Workspaces (/v1/workspaces): a namespacing/bundling layer, now with
+  real optional ownership (§Phase 5 Step 2) — but still not general access
+  control. A workspace with no owner is exactly as open as Step 1's original,
+  accountless design; an owned workspace has exactly one protected operation
+  (only the owner can re-POST it), not a role hierarchy.
+- Accounts (/auth/*, §Phase 5 Step 2): Google and GitHub OAuth only, one role
+  (owner). Built to answer one question — "who can modify this workspace" —
+  not to become general-purpose identity infrastructure for CTCL.
 
 ## Prototype
 
@@ -2122,7 +2418,8 @@ const CORPUS_ACCEPTED_CONCEPTS_MD = `# Accepted concepts
 | SDK monotonic()/guardedNow()/offlineNow() (§32/§33/§39) | stable, client-side | 2026-07-12 |
 | Share Instant QR Code (§6.6) | stable | 2026-07-14 |
 | Leap-aware TAI/GPS (full 1972-2017 historical table) | stable, no future prediction | 2026-07-14 |
-| Shared Workspaces (Phase 5 Step 1) | stable, no accounts/access-control by design | 2026-07-14 |
+| Shared Workspaces (Phase 5) | stable | 2026-07-14 |
+| Accounts: Google/GitHub OAuth, session cookies (Phase 5 Step 2) | stable, single-role (owner) scope | 2026-07-14 |
 `;
 
 const CORPUS_DEPRECATED_CONCEPTS_MD = `# Deprecated / superseded
@@ -2778,6 +3075,11 @@ export default {
       if (rest.endsWith("/expand")) return expandWorkspace(rest.slice(0, -7), request, env);
       return getWorkspace(rest, env);
     }
+    if (p.startsWith("/auth/") && p.endsWith("/start")) return oauthStart(p.slice(6, -6), request, env);
+    if (p.startsWith("/auth/") && p.endsWith("/callback")) return oauthCallback(p.slice(6, -9), request, env);
+    if (p === "/auth/me") return handleAuthMe(request, env);
+    if (p === "/auth/logout" && request.method === "POST") return handleLogout(request, env);
+    if (p === "/account") return new Response(accountPage(), { headers: { "Content-Type": "text/html; charset=utf-8", ...CORS } });
     if (p === "/v1/boundaries/inspect" && request.method === "POST") return inspectBoundary(request, env);
     if (p === "/v1/resolve" && request.method === "POST") return handleResolve(request);
     if (p === "/v1/planner/shared-instant" && request.method === "POST") return planSharedInstant(request, env);
@@ -3091,7 +3393,7 @@ curl -s ${origin}/v1/instant/ctcl:instant:…</pre>
 
  <footer>
   <span data-zh="CTCL v0.1 · 參考＋轉換層，不是授時機構。">CTCL v0.1 · a reference + transformation layer, not a timing authority.</span><br>
-  <a href="/sdk.js">JS SDK</a> · <a href="/openapi.json">OpenAPI</a> · <a href="/ai/ctcl.json">tool declaration</a> · <a href="/developers">developers</a> · <a href="/status">status</a> · Neo.K / 一言諾科技有限公司 · EveMissLab
+  <a href="/sdk.js">JS SDK</a> · <a href="/openapi.json">OpenAPI</a> · <a href="/ai/ctcl.json">tool declaration</a> · <a href="/developers">developers</a> · <a href="/status">status</a> · <a href="/account">account</a> · Neo.K / 一言諾科技有限公司 · EveMissLab
  </footer>
 </div>
 

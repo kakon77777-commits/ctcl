@@ -9,3 +9,8 @@ node_modules/
 # os
 .DS_Store
 Thumbs.db
+
+# accidental secret drops (OAuth client secret notes, etc.) - never commit these
+*用戶端*.txt
+*client*secret*
+*CLIENT_SECRET*

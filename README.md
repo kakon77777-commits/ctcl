@@ -51,7 +51,8 @@ that first.
 | `POST /v1/systems` · `GET /v1/systems` · `/{id}` · `/{id}/now` | persistent custom systems — `rate.type` = constant \| piecewise \| **paused** (active-time) \| table |
 | `GET /v1/path` | transform-graph route between systems/timescales |
 | `POST /v1/temporal-groups` · `GET /v1/temporal-groups` · `/{id}` · `POST /{id}/expand` | **Temporal Groups** — "One Instant, Many Systems": project one instant across every member (builtin timescale \| `tz:<IANA>` \| custom system id) in a single call |
-| `POST /v1/workspaces` · `GET /v1/workspaces` · `/{id}` · `POST /{id}/expand` | **Shared Workspaces** (Phase 5 Step 1) — bundle existing systems/groups under one shareable, signed id for team/multi-agent coordination; **no accounts, no access control** (a namespacing convenience, not a security boundary) |
+| `POST /v1/workspaces` · `GET /v1/workspaces` · `/{id}` · `POST /{id}/expand` | **Shared Workspaces** (Phase 5) — bundle existing systems/groups under one shareable, signed id for team/multi-agent coordination; signing in makes `owner` real and protects it, staying unsigned-in stays exactly as open as ever |
+| `GET /auth/{google,github}/{start,callback}` · `GET /auth/me` · `POST /auth/logout` · `GET /account` | **Accounts** (Phase 5 Step 2) — optional Google/GitHub sign-in, exists solely to make Shared Workspace ownership real; nothing else on CTCL requires it |
 | `POST /v1/boundaries/inspect` | **Boundary Inspector** — proactive gap/fold/pause/rate_change status check + upcoming DST transitions; never errors, unlike `/v1/convert` |
 | `POST /v1/resolve` | **Semantic Resolution** — `resolve_temporal_context`: ambiguous input (city, alias, tz abbreviation) → IANA candidates + confidence; never silently disambiguates |
 | `POST /v1/planner/shared-instant` · `GET /v1/planner/constraint-types` | **Constraint Planner** — `plan_shared_instant`: I\* = argmax_I U(I \| constraints) over a bounded search window; weighted `weekday_hours`/`avoid_window`/`prefer_window`/`min_lead_time`/`system_not_paused`/`market_hours` |
@@ -107,18 +108,20 @@ type (`/v1/instants`, `/v1/systems`, `/v1/temporal-groups`) is now Ed25519-signe
 QR Code; and `tai`/`gps` timescales now use the full 1972-2017 historical leap-second
 table instead of a flat current-day offset, so a historical instant gets the offset
 that was actually true then (a future undeclared leap second still can't be predicted —
-nobody can). **Temporal Port App whitepaper Phase 5 Step 1 shipped the same day**:
+nobody can). **Temporal Port App whitepaper Phase 5 shipped the same day, both steps**:
 `POST/GET /v1/workspaces` + `POST /v1/workspaces/{id}/expand` — a Shared Workspace
 bundles existing system/group ids under one shareable, signed id for team/multi-agent
-coordination, built entirely without accounts (Neo.K decided CTCL will not be a paid
-product, removing the reason to gate this behind billing — but real role permissions
-still need actual identity, so Step 1 deliberately ships only the namespacing/bundling
-half; a workspace id is not a credential, it's a coordination convenience, same
-public-write model as every other resource here). Remaining: `custom_expression`
-transform (intentionally unimplemented — arbitrary-expression eval is a security
-risk); hard rate limits via Durable Object; trust elevation (T3/T4); accounts/role
-permissions for workspaces (Phase 5 Step 2); simulation / robotics / digital-twin
-adapters.
+coordination (Step 1, built entirely without accounts, since Neo.K decided CTCL will
+not be a paid product, removing the reason to gate this behind billing) — and then,
+the same day, Google + GitHub sign-in (`GET /auth/{google,github}/{start,callback}`,
+`GET /auth/me`, `POST /auth/logout`, the human `/account` page) so a workspace's
+`owner` field is real: signed-in creation sets it, and only that account can modify
+it afterward (Step 2, one role — owner-vs-everyone — not general RBAC). Signing in is
+entirely optional; every other resource type, and unowned workspaces, remain exactly
+as accountless as CTCL always was. Remaining: `custom_expression` transform
+(intentionally unimplemented — arbitrary-expression eval is a security risk); hard
+rate limits via Durable Object; trust elevation (T3/T4); simulation / robotics /
+digital-twin adapters.
 
 CommonInstant Web whitepaper progress: P0 (schema/versioning/error-model stabilization) was
 already satisfied by the API whitepaper work above. **P1 — Temporal Groups ("One Instant,
@@ -228,3 +231,27 @@ a workspace id is **not** a credential — this API has no accounts, so a worksp
 exactly as publicly readable/writable as any system or group already is. It's a
 namespacing convenience (a discoverable "everything for project X" bundle), not access
 control; real role permissions are Phase 5's own Step 2, not started.
+
+**2026-07-14 (continued the same day) — Phase 5 Step 2: Google/GitHub sign-in.** Neo.K
+asked directly for the usual login methods, picking Google and GitHub together
+(GitHub fitting CTCL's own developer/agent-builder audience — every related repo
+already lives there). Shipped `GET /auth/{google,github}/{start,callback}`,
+`GET /auth/me`, `POST /auth/logout`, and a minimal `/account` sign-in page — 30-day
+KV-backed session cookies (`HttpOnly`, `Secure`, `SameSite=Lax`), CSRF-defended with a
+one-time, 10-minute state token, both providers sharing one OAuth2 implementation
+(authorize-URL construction, code exchange, userinfo fetch) rather than two
+near-duplicate flows. The entire reason this exists: creating a workspace while
+signed in now sets its `owner` to your account, and re-posting an owned workspace
+requires being that same account (`403 FORBIDDEN` otherwise) — a client-supplied
+`owner` in the request body is ignored outright, since accepting it would have been a
+privilege-escalation bug the moment enforcement became real. Unowned workspaces and
+every other resource type stay exactly as accountless as before; signing in is
+opt-in, never required. Google Cloud Console and GitHub OAuth App registration both
+require Neo's own developer-account ownership — an agent registering third-party
+apps under someone else's identity is out of scope, both as policy and because
+someone has to own that registration long-term — so the client id/secret pairs are
+his to generate; secrets go straight into Cloudflare via `wrangler secret put`,
+mirroring `CTCL_SIGN_KEY`, never through chat. Everything else (state/CSRF, cookie
+handling, ownership enforcement, spoofed-owner rejection) was built and verified
+against real seeded KV sessions in `wrangler dev` before either provider's real
+credentials existed.
