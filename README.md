@@ -51,6 +51,7 @@ that first.
 | `POST /v1/systems` · `GET /v1/systems` · `/{id}` · `/{id}/now` | persistent custom systems — `rate.type` = constant \| piecewise \| **paused** (active-time) \| table |
 | `GET /v1/path` | transform-graph route between systems/timescales |
 | `POST /v1/temporal-groups` · `GET /v1/temporal-groups` · `/{id}` · `POST /{id}/expand` | **Temporal Groups** — "One Instant, Many Systems": project one instant across every member (builtin timescale \| `tz:<IANA>` \| custom system id) in a single call |
+| `POST /v1/workspaces` · `GET /v1/workspaces` · `/{id}` · `POST /{id}/expand` | **Shared Workspaces** (Phase 5 Step 1) — bundle existing systems/groups under one shareable, signed id for team/multi-agent coordination; **no accounts, no access control** (a namespacing convenience, not a security boundary) |
 | `POST /v1/boundaries/inspect` | **Boundary Inspector** — proactive gap/fold/pause/rate_change status check + upcoming DST transitions; never errors, unlike `/v1/convert` |
 | `POST /v1/resolve` | **Semantic Resolution** — `resolve_temporal_context`: ambiguous input (city, alias, tz abbreviation) → IANA candidates + confidence; never silently disambiguates |
 | `POST /v1/planner/shared-instant` · `GET /v1/planner/constraint-types` | **Constraint Planner** — `plan_shared_instant`: I\* = argmax_I U(I \| constraints) over a bounded search window; weighted `weekday_hours`/`avoid_window`/`prefer_window`/`min_lead_time`/`system_not_paused`/`market_hours` |
@@ -106,9 +107,18 @@ type (`/v1/instants`, `/v1/systems`, `/v1/temporal-groups`) is now Ed25519-signe
 QR Code; and `tai`/`gps` timescales now use the full 1972-2017 historical leap-second
 table instead of a flat current-day offset, so a historical instant gets the offset
 that was actually true then (a future undeclared leap second still can't be predicted —
-nobody can). Remaining: `custom_expression` transform (intentionally unimplemented —
-arbitrary-expression eval is a security risk); hard rate limits via Durable Object;
-trust elevation (T3/T4); simulation / robotics / digital-twin adapters.
+nobody can). **Temporal Port App whitepaper Phase 5 Step 1 shipped the same day**:
+`POST/GET /v1/workspaces` + `POST /v1/workspaces/{id}/expand` — a Shared Workspace
+bundles existing system/group ids under one shareable, signed id for team/multi-agent
+coordination, built entirely without accounts (Neo.K decided CTCL will not be a paid
+product, removing the reason to gate this behind billing — but real role permissions
+still need actual identity, so Step 1 deliberately ships only the namespacing/bundling
+half; a workspace id is not a credential, it's a coordination convenience, same
+public-write model as every other resource here). Remaining: `custom_expression`
+transform (intentionally unimplemented — arbitrary-expression eval is a security
+risk); hard rate limits via Durable Object; trust elevation (T3/T4); accounts/role
+permissions for workspaces (Phase 5 Step 2); simulation / robotics / digital-twin
+adapters.
 
 CommonInstant Web whitepaper progress: P0 (schema/versioning/error-model stabilization) was
 already satisfied by the API whitepaper work above. **P1 — Temporal Groups ("One Instant,
@@ -202,3 +212,19 @@ wrong for historical instants — a 1990 date got 2017's +37s instead of 1990's 
 historical offsets before deploying. This still can't predict a future undeclared leap
 second — nobody can, IERS gives ~6 months' notice — so post-2017 accuracy depends on
 the table staying current; none has been declared since 2017-01-01.
+
+**2026-07-14 (later the same day) — Phase 5 Step 1: Shared Workspaces, no accounts.**
+Neo.K decided CTCL will not be a paid product, resolving the reason a Phase 5
+recommendation had flagged for not starting Team Sync yet (the whitepaper ties it to
+paid tiers). That still left an open question — real role permissions need identity,
+and building that touches both this Web deployment and the App, so it deserved its own
+decision rather than being made mid-feature. The agreed starting point: the smallest
+zero-commitment slice first. `POST/GET /v1/workspaces` and
+`POST /v1/workspaces/{id}/expand` bundle existing system/group ids under one
+shareable, Ed25519-signed id (same version-bump convention as Temporal Groups), and
+`expand` resolves every member system and every member group's own members at one
+shared instant in a single call. Repeated deliberately everywhere this is documented:
+a workspace id is **not** a credential — this API has no accounts, so a workspace is
+exactly as publicly readable/writable as any system or group already is. It's a
+namespacing convenience (a discoverable "everything for project X" bundle), not access
+control; real role permissions are Phase 5's own Step 2, not started.

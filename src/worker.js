@@ -369,6 +369,7 @@ const KNOWN_LIMITATIONS = [
   "no source allowlist or app-level audit log (§31.1) — the API is read-only/query-only (nothing external is ingested to allowlist), and Cloudflare's platform request logs are the only request log today",
   "gpu_availability and simulation_state planner constraints require an external data feed this deployment does not have",
   "no CLI or webhook relay yet — REST, SDK, and the web playground are the only interfaces today",
+  "Shared Workspaces (/v1/workspaces, Phase 5 Step 1) have NO accounts and NO access control — anyone who can reach this API can read/overwrite any workspace, same public-write model as every other resource; real role permissions would need actual accounts, deliberately not built",
 ];
 function versionInfo(env) {
   return runtimeHealth(env).then((runtime) => ok({
@@ -558,11 +559,97 @@ async function expandGroup(id, req, env) {
   } else {
     ns = BigInt(Date.now()) * NS_PER.ms; source = "now";
   }
-  const members = await Promise.all(grp.members.map((m) => resolveMember(m, ns, env)));
+  const members = await resolveGroupMembers(grp, ns, env);
   return ok({
     group_id: grp.id, group_version: grp.version,
     instant: { source, unix_ns: ns.toString(), rfc3339: rfc3339(ns, "UTC") },
     members,
+  }, {}, "no-store");
+}
+// Extracted so both group-expand and workspace-expand share the same per-member
+// resolution + error isolation (one bad member never fails the whole request).
+async function resolveGroupMembers(grp, ns, env) {
+  return Promise.all(grp.members.map((m) => resolveMember(m, ns, env)));
+}
+
+// ---- Phase 5 Step 1 — Shared Workspace (whitepaper "shared workspaces", zero
+// accounts): a workspace bundles existing system/group ids under one shareable
+// id. Knowing the id is NOT an access-control boundary — this API has no
+// accounts at all, so creating/reading/expanding a workspace is exactly as
+// public as creating/reading any system or group already is; a workspace is a
+// NAMESPACING convenience (a discoverable "everything for project X" bundle),
+// not a security mechanism. Real role permissions (§Phase-5 Step 2) would need
+// actual accounts, deliberately not built yet — see corpus/current.md.
+async function createWorkspace(req, env) {
+  if (!env || !env.CTCL_KV) return kvMissing();
+  let body;
+  try { body = await req.json(); } catch { return fail("INVALID_TIME_VALUE", "body must be JSON"); }
+  const wsp = body.workspace || body;
+  if (!wsp.id) return fail("INVALID_TIME_VALUE", "workspace.id required (e.g. workspace:project-alpha)");
+  const systems = Array.isArray(wsp.systems) ? wsp.systems : [];
+  const groups = Array.isArray(wsp.groups) ? wsp.groups : [];
+  if (!systems.length && !groups.length) return fail("INVALID_TIME_VALUE", "workspace needs at least one system or group id, in systems[] and/or groups[]");
+  const existingRaw = await env.CTCL_KV.get("workspace:" + wsp.id);
+  const existing = existingRaw ? JSON.parse(existingRaw) : null;
+  const rec = {
+    id: wsp.id, name: wsp.name || (existing && existing.name) || null,
+    systems, groups, owner: wsp.owner || (existing && existing.owner) || null,
+    version: String(existing ? Number(existing.version || "1") + 1 : 1),
+    created_at: existing ? existing.created_at : new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  const sig = await signWorkspaceRecord(env, rec);
+  if (sig) rec.signature = sig;
+  await env.CTCL_KV.put("workspace:" + wsp.id, JSON.stringify(rec));
+  return ok({ ...rec, expand: `/v1/workspaces/${encodeURIComponent(wsp.id)}/expand` },
+    { note: "No accounts: this is a namespacing convenience, not access control — anyone who can reach this API can also read/overwrite this workspace, same as any system or group. POST /v1/workspaces/{id}/expand resolves every member system and group at one shared instant." });
+}
+
+async function getWorkspace(id, env) {
+  if (!env || !env.CTCL_KV) return kvMissing();
+  const raw = await env.CTCL_KV.get("workspace:" + id);
+  if (!raw) return fail("UNKNOWN_WORKSPACE", `no such workspace: ${id}`, {}, 404);
+  return ok(JSON.parse(raw));
+}
+
+async function listWorkspaces(env) {
+  if (!env || !env.CTCL_KV) return kvMissing();
+  const l = await env.CTCL_KV.list({ prefix: "workspace:" });
+  const workspaces = l.keys.map((k) => k.name.replace(/^workspace:/, ""));
+  return ok({ count: workspaces.length, workspaces, truncated: !l.list_complete,
+    note: "GET /v1/workspaces/{id} for a definition; POST .../expand to resolve every member system/group at a shared instant in one call." });
+}
+
+async function expandWorkspace(id, req, env) {
+  if (!env || !env.CTCL_KV) return kvMissing();
+  const raw = await env.CTCL_KV.get("workspace:" + id);
+  if (!raw) return fail("UNKNOWN_WORKSPACE", `no such workspace: ${id}`, {}, 404);
+  const wsp = JSON.parse(raw);
+  let body = {};
+  try { body = await req.json(); } catch { /* empty body -> expand "now" */ }
+  let ns, source;
+  if (body.instant_id) {
+    const rawI = await env.CTCL_KV.get("instant:" + uuidOf(body.instant_id));
+    if (!rawI) return fail("UNKNOWN_INSTANT", `no registered instant: ${body.instant_id}`, {}, 404);
+    ns = BigInt(JSON.parse(rawI).unix_ns); source = "registered_instant";
+  } else if (body.value != null) {
+    try { ns = toNs(body.value, body.encoding); }
+    catch (e) { return fail(e.code || "INVALID_TIME_VALUE", e.msg || String(e)); }
+    source = "explicit_value";
+  } else {
+    ns = BigInt(Date.now()) * NS_PER.ms; source = "now";
+  }
+  const systems = await Promise.all((wsp.systems || []).map((sid) => resolveMember(sid, ns, env)));
+  const groups = await Promise.all((wsp.groups || []).map(async (gid) => {
+    const rawG = await env.CTCL_KV.get("group:" + gid);
+    if (!rawG) return { group: gid, error: "UNKNOWN_GROUP", message: `no such group: ${gid}` };
+    const grp = JSON.parse(rawG);
+    return { group: gid, group_version: grp.version, members: await resolveGroupMembers(grp, ns, env) };
+  }));
+  return ok({
+    workspace_id: wsp.id, workspace_version: wsp.version, name: wsp.name,
+    instant: { source, unix_ns: ns.toString(), rfc3339: rfc3339(ns, "UTC") },
+    systems, groups,
   }, {}, "no-store");
 }
 
@@ -761,6 +848,7 @@ const ERROR_CODES = [
   ["UNSUPPORTED_POLICY", 400, "invalid rate/system policy in a custom system definition"],
   ["UNKNOWN_SYSTEM", 404, "no such custom system id"],
   ["UNKNOWN_GROUP", 404, "no such Temporal Group id"],
+  ["UNKNOWN_WORKSPACE", 404, "no such Shared Workspace id"],
   ["UNKNOWN_INSTANT", 404, "no such registered instant id"],
   ["UNKNOWN_TRANSFORM", 404, "no such transform type id"],
   ["REGISTRY_UNAVAILABLE", 503, "CTCL_KV not bound on this deployment"],
@@ -832,7 +920,7 @@ function developerConsolePage() {
 
 <h2 style="font-size:1.05rem;margin-top:1.6rem">Changelog</h2>
 <div class="card">
- <div class="row"><span class="k">2026-07-14</span><span class="v">Share Instant page gained a server-rendered QR Code (§6.6); custom systems and Temporal Groups are now Ed25519-signed too (§31.1) — every persisted resource type is signed; tai/gps timescales are now leap-aware via the full 1972-2017 historical offset table instead of a flat current-day offset</span></div>
+ <div class="row"><span class="k">2026-07-14</span><span class="v">Shared Workspaces (/v1/workspaces, Phase 5 Step 1) — bundle systems/groups under one signed, shareable id, no accounts; QR Code on Share Instant (§6.6); every persisted resource type Ed25519-signed (§31.1); tai/gps timescales now leap-aware via the full 1972-2017 historical offset table</span></div>
  <div class="row"><span class="k">2026-07-12</span><span class="v">Registered instants (/v1/instants) now Ed25519-signed (§31); SDK gained monotonic() (§32), guardedNow() rollback detection (§33), offlineNow() degraded mode (§39), and a maxAgeMs staleness check in verifyInstant()</span></div>
  <div class="row"><span class="k">2026-07-11</span><span class="v">Constraint Planner, Semantic Resolution, Share Instant, Boundary Inspector, Temporal Groups — CommonInstant Web whitepaper P1–P6</span></div>
  <div class="row"><span class="k">2026-07-11</span><span class="v">Ed25519-signed instants (§31), native rate limiting (§38), table_lookup transform</span></div>
@@ -1120,6 +1208,12 @@ function toolDeclaration(origin) {
       { name: "list-groups", method: "GET", path: "/v1/temporal-groups", desc: "List all stored Temporal Groups.", input: {}, output: "group ids" },
       { name: "expand-group", method: "POST", path: "/v1/temporal-groups/{id}/expand", desc: "THE CommonInstant Web flagship: project ONE instant across every member of a group — E(I*, G) = {τ1,...,τn}, \"One Instant, Many Systems\". Default instant is now; pass instant_id to align on a previously-registered I*, or an explicit value+encoding.",
         input: { instant_id: "string?", value: "string?", encoding: "string?" }, output: "instant + members[] (each with its local representation)" },
+      { name: "create-workspace", method: "POST", path: "/v1/workspaces", desc: "Phase 5 Step 1 — Shared Workspace: bundle existing system/group ids under one shareable id for team/multi-agent coordination. NO accounts, NO access control (whoever can reach this API can also read/overwrite it, same as any system or group) — a namespacing convenience only. Re-posting the same id bumps its version.",
+        input: { id: "workspace:project-alpha", name: "string?", systems: ["user:game_world"], groups: ["group:project-alpha-tz"], owner: "string?" }, output: "workspace record + expand URL + optional Ed25519 signature over this version (§31.1)" },
+      { name: "get-workspace", method: "GET", path: "/v1/workspaces/{id}", desc: "Retrieve a Shared Workspace definition.", input: { id: "string" }, output: "workspace record" },
+      { name: "list-workspaces", method: "GET", path: "/v1/workspaces", desc: "List all stored Shared Workspaces.", input: {}, output: "workspace ids" },
+      { name: "expand-workspace", method: "POST", path: "/v1/workspaces/{id}/expand", desc: "Resolve every member system AND every member group's members, all at one shared instant, in a single call — a workspace-scoped generalization of expand-group. Default instant is now; pass instant_id or an explicit value+encoding.",
+        input: { instant_id: "string?", value: "string?", encoding: "string?" }, output: "instant + systems[] + groups[] (each group carries its own resolved members[])" },
       { name: "inspect-boundary", method: "POST", path: "/v1/boundaries/inspect", desc: "Proactive pre-flight check (§5.6): is this local time / custom-system state safe? Unlike /v1/convert, never errors — always returns a status: normal|gap|fold (timezone) or normal|pause|rate_change (system), plus upcoming DST transitions within a window.",
         input: { timezone: "IANA?", local_value: "naive local datetime string?", window_hours: "number? (default 48)" }, input_alt: { system_id: "string?", value: "string?", encoding: "string?" }, output: "status + safe + detail" },
       { name: "resolve-temporal-context", method: "POST", path: "/v1/resolve", desc: "resolve_temporal_context (§6): map an ambiguous input (city name, common alias, tz abbreviation) to IANA timezone candidates with confidence. NEVER silently picks one when genuinely ambiguous (e.g. \"CST\"). Free-form natural-language time phrases are explicitly out of scope — honest empty result, not a guess.",
@@ -1162,6 +1256,9 @@ function openapi(origin) {
       "/v1/temporal-groups": { get: { summary: "List Temporal Groups", responses: { 200: { description: "ok" } } }, post: { summary: "Create/update a Temporal Group", responses: { 200: { description: "ok" } } } },
       "/v1/temporal-groups/{id}": { get: { summary: "Get a Temporal Group definition", responses: { 200: { description: "ok" }, 404: { description: "unknown group" } } } },
       "/v1/temporal-groups/{id}/expand": { post: { summary: "One Instant, Many Systems: expand an instant across every group member", responses: { 200: { description: "ok" }, 404: { description: "unknown group/instant" } } } },
+      "/v1/workspaces": { get: { summary: "List Shared Workspaces (Phase 5 Step 1, no accounts)", responses: { 200: { description: "ok" } } }, post: { summary: "Create/update a Shared Workspace", responses: { 200: { description: "ok" } } } },
+      "/v1/workspaces/{id}": { get: { summary: "Get a Shared Workspace definition", responses: { 200: { description: "ok" }, 404: { description: "unknown workspace" } } } },
+      "/v1/workspaces/{id}/expand": { post: { summary: "Resolve every member system and group at one shared instant", responses: { 200: { description: "ok" }, 404: { description: "unknown workspace/instant" } } } },
       "/v1/boundaries/inspect": { post: { summary: "Boundary Inspector (§5.6): proactive gap/fold/pause/rate_change status check", responses: { 200: { description: "ok" } } } },
       "/v1/resolve": { post: { summary: "resolve_temporal_context (§6): ambiguous input -> IANA candidates with confidence", responses: { 200: { description: "ok" } } } },
       "/v1/planner/shared-instant": { post: { summary: "plan_shared_instant (§7): constraint-solve for a best shared instant", responses: { 200: { description: "ok" }, 400: { description: "window/constraints invalid" } } } },
@@ -1226,6 +1323,13 @@ async function signSystemRecord(env, rec) {
 async function signGroupRecord(env, rec) {
   const canonical = rec.id + "|" + JSON.stringify({ members: rec.members, owner: rec.owner, version: rec.version }) + "|" + rec.updated_at;
   return ed25519SignMessage(env, canonical, "group_id|canonical_json(members,owner,version)|updated_at");
+}
+// Same version-bump convention as Temporal Groups (§5.5) — a workspace re-post
+// under the same id is a distinct definition, so the signature is tied to
+// updated_at, covering exactly the fields a re-post can change.
+async function signWorkspaceRecord(env, rec) {
+  const canonical = rec.id + "|" + JSON.stringify({ name: rec.name, systems: rec.systems, groups: rec.groups, owner: rec.owner, version: rec.version }) + "|" + rec.updated_at;
+  return ed25519SignMessage(env, canonical, "workspace_id|canonical_json(name,systems,groups,owner,version)|updated_at");
 }
 async function signInstant(env, inst) {
   const sig = await ed25519SignFields(env, inst.instant.id, inst.encodings.unix_ns, inst.instant.reference.timescale);
@@ -1351,6 +1455,14 @@ export function CTCL(base = '${origin}') {
     getGroup:    async (id) => D(await j('/v1/temporal-groups/' + encodeURIComponent(id))),
     listGroups:  async () => D(await j('/v1/temporal-groups')),
     expandGroup: async (id, opts = {}) => D(await post('/v1/temporal-groups/' + encodeURIComponent(id) + '/expand', opts)),
+
+    // ---- Shared Workspaces: bundle systems/groups under one id (Phase 5 Step 1) --
+    // NO accounts, NO access control - knowing the id is a coordination convenience,
+    // not a credential. Real role permissions are an explicit later step.
+    createWorkspace: async (def) => D(await post('/v1/workspaces', def)),
+    getWorkspace:    async (id) => D(await j('/v1/workspaces/' + encodeURIComponent(id))),
+    listWorkspaces:  async () => D(await j('/v1/workspaces')),
+    expandWorkspace: async (id, opts = {}) => D(await post('/v1/workspaces/' + encodeURIComponent(id) + '/expand', opts)),
 
     // ---- Boundary Inspector: proactive gap/fold/pause/rate_change check (§5.6) --
     inspectBoundary: async (input) => D(await post('/v1/boundaries/inspect', input)),
@@ -1533,6 +1645,7 @@ function aiManifest(origin) {
       { path: "ai/specs/error-schema.json", role: "JSON Schema for the {ok:false,error} envelope", format: "json-schema" },
       { path: "ai/specs/system-schema.json", role: "JSON Schema for a custom temporal system definition", format: "json-schema" },
       { path: "ai/specs/group-schema.json", role: "JSON Schema for a Temporal Group definition", format: "json-schema" },
+      { path: "ai/specs/workspace-schema.json", role: "JSON Schema for a Shared Workspace definition (Phase 5 Step 1, no accounts)", format: "json-schema" },
     ],
     examples: [
       "ai/examples/000-verified-instant.md", "ai/examples/001-multi-agent-alignment.md", "ai/examples/002-precision-preserving-convert.md",
@@ -1564,7 +1677,7 @@ function aiManifest(origin) {
 const AI_VERSION_JSON = {
   manifest_version: "0.1", aicl_layer_version: "0.1", api_version: API_VERSION, release: "0.1",
   spec_version: "ctcl-v1", rights_spectrum_version: "0.1",
-  last_major_milestone: "Share Instant QR Code (§6.6) + every persisted resource signed (§31.1) + leap-aware TAI/GPS",
+  last_major_milestone: "Shared Workspaces (Phase 5 Step 1, no accounts) + Share Instant QR Code + every persisted resource signed (§31.1) + leap-aware TAI/GPS",
   last_updated: "2026-07-14",
 };
 
@@ -1574,7 +1687,7 @@ const AI_SITEMAP_JSON = {
     "ai/corpus/origin.md", "ai/corpus/current.md", "ai/corpus/design-history.md", "ai/corpus/concept-genealogy.md",
     "ai/corpus/engineering-notes.md", "ai/corpus/accepted-concepts.md", "ai/corpus/deprecated-concepts.md",
     "ai/corpus/public-summary.md", "ai/corpus/full-corpus.jsonl",
-    "ai/specs/ctcl-v1.md", "ai/specs/instant-schema.json", "ai/specs/error-schema.json", "ai/specs/system-schema.json", "ai/specs/group-schema.json",
+    "ai/specs/ctcl-v1.md", "ai/specs/instant-schema.json", "ai/specs/error-schema.json", "ai/specs/system-schema.json", "ai/specs/group-schema.json", "ai/specs/workspace-schema.json",
     "ai/examples/000-verified-instant.md", "ai/examples/001-multi-agent-alignment.md", "ai/examples/002-precision-preserving-convert.md",
     "ai/examples/003-custom-world-clock.md", "ai/examples/004-one-instant-many-systems.md", "ai/examples/005-boundary-inspection.md", "ai/examples/006-constraint-planning.md",
     "ai/tools/catalog.json", "ai/tools/tools.md",
@@ -1666,6 +1779,11 @@ is ever missing.
 - Temporal Groups: POST and GET /v1/temporal-groups, POST /v1/temporal-groups/{id}/expand
   — "One Instant, Many Systems," CTCL's flagship differentiator: project one instant
   across every member of a named, versioned group in a single call.
+- Shared Workspaces (Phase 5 Step 1): POST and GET /v1/workspaces, POST
+  /v1/workspaces/{id}/expand — bundle existing system/group ids under one
+  shareable, versioned, signed id for team/multi-agent coordination. Deliberately
+  NO accounts and NO access control (see "What is honestly NOT implemented"
+  below) — a namespacing convenience, not an auth boundary.
 - Boundary Inspector: POST /v1/boundaries/inspect — proactive gap/fold/pause/rate_change
   status check that never errors (unlike /v1/convert).
 - Semantic Resolution: POST /v1/resolve — ambiguous place/alias/abbreviation input to
@@ -1687,6 +1805,8 @@ live-rendered version of the same list:
 - A source allowlist or app-level audit log (the API is read-only/query-only, so there
   is nothing external to allowlist; Cloudflare's own platform request logs are the only
   request log today)
+- Accounts and role permissions for Shared Workspaces (Phase 5's own "Step 2" —
+  deliberately deferred; Step 1 ships the namespacing/bundling half only)
 - gpu_availability and simulation_state planner constraints (no external data feed)
 - A live MCP server, a CLI, a webhook relay
 
@@ -1813,6 +1933,32 @@ NOT and cannot predict a future undeclared leap second — nobody can, IERS give
 current; none has been declared since 2017-01-01. Verified offline against known
 historical offsets (1975, 1990, 2000, the 1980-01-06 GPS epoch, and the pre-1972/
 pre-GPS-epoch clamp/not-applicable cases) before deploying.
+
+## 2026-07-14 — Phase 5 Step 1: Shared Workspaces, no accounts
+
+Neo.K resolved the business-model question behind the Temporal Port App whitepaper's
+Phase 5 ("Team Sync"): CTCL will not be a paid product, which removed the reason to
+gate Team-tier features behind billing. That still left a real open question — real
+"role permissions" need SOME notion of identity, and building that is a bigger,
+cross-project decision (it would touch both this Web deployment and the App) that
+deserved its own recommendation rather than being decided mid-feature. That
+recommendation was: start with the smallest, zero-commitment slice — a "shared
+workspace" identified by nothing more than its own id, reusing entirely existing,
+already-tested infrastructure (the signed system/group registries), before building
+any account system. Neo agreed to that starting point.
+
+Shipped POST/GET /v1/workspaces and POST /v1/workspaces/{id}/expand: a workspace
+bundles existing system and group ids under one shareable id, signed the same way
+groups are (version-bumped, tied to updated_at). Expand resolves every member system
+and every member group's own members, all at one shared instant, in a single call —
+a workspace-scoped generalization of the existing group-expand endpoint (its
+per-member resolution logic was extracted into resolveGroupMembers() so both share
+it, rather than duplicating the loop). The one thing repeated deliberately, in every
+place this is documented: a workspace id is NOT a credential in any security sense —
+this API has no accounts, so anyone who can reach it can already read or overwrite
+any system or group by id, and a workspace is exactly as public. It is a namespacing
+convenience (a discoverable "everything for project X" bundle), not access control.
+Real role permissions are Phase 5's own "Step 2," explicitly not started.
 `;
 
 const CORPUS_CONCEPT_GENEALOGY_MD = `# Concept genealogy
@@ -1840,8 +1986,9 @@ concepts are not "coming soon" — they were considered and declined.
 - Temporal Groups and the group-expand operation.
 - The Boundary Inspector's status enum: normal, gap, fold, pause, rate_change.
 - Ed25519 signing of every persisted resource: /v1/now, registered instants
-  (/v1/instants), custom system definitions (/v1/systems), and Temporal Groups
-  (/v1/temporal-groups, re-signed on each version bump).
+  (/v1/instants), custom system definitions (/v1/systems), Temporal Groups
+  (/v1/temporal-groups), and Shared Workspaces (/v1/workspaces) — all re-signed
+  on each version bump for the versioned resource types.
 - SDK-side monotonic duration timing, clock-rollback detection, and offline degraded
   mode (§32/§33/§39) — client-side concerns by the whitepaper's own definition, not
   server state.
@@ -1855,6 +2002,11 @@ concepts are not "coming soon" — they were considered and declined.
   not by oversight — see engineering-notes.md.
 - The Constraint Planner (plan_shared_instant): a bounded demonstration of
   constraint-based instant solving, explicitly not a full meeting-scheduler product.
+- Shared Workspaces (/v1/workspaces, Phase 5 Step 1): a namespacing/bundling
+  layer only. Deliberately ships with NO accounts and NO access control — the
+  scope is "knowing the id lets you coordinate," not "knowing the id is a
+  credential." Real role permissions are an explicit later step, not implied by
+  this one.
 
 ## Prototype
 
@@ -1970,6 +2122,7 @@ const CORPUS_ACCEPTED_CONCEPTS_MD = `# Accepted concepts
 | SDK monotonic()/guardedNow()/offlineNow() (§32/§33/§39) | stable, client-side | 2026-07-12 |
 | Share Instant QR Code (§6.6) | stable | 2026-07-14 |
 | Leap-aware TAI/GPS (full 1972-2017 historical table) | stable, no future prediction | 2026-07-14 |
+| Shared Workspaces (Phase 5 Step 1) | stable, no accounts/access-control by design | 2026-07-14 |
 `;
 
 const CORPUS_DEPRECATED_CONCEPTS_MD = `# Deprecated / superseded
@@ -2087,9 +2240,9 @@ ai/specs/error-schema.json's error.code description.
 
 now, timescales, encodings, convert, transform, instants (create/get), i/{id} (human
 share page), systems (create/list/get/now), path, temporal-groups (create/list/get/
-expand), boundaries/inspect, resolve, planner/shared-instant, planner/constraint-types,
-validate, transforms (catalog), version, pubkey. Full detail: /openapi.json and
-/ai/ctcl.json.
+expand), workspaces (create/list/get/expand), boundaries/inspect, resolve,
+planner/shared-instant, planner/constraint-types, validate, transforms (catalog),
+version, pubkey. Full detail: /openapi.json and /ai/ctcl.json.
 `;
 
 const SPECS_INSTANT_SCHEMA = {
@@ -2154,6 +2307,22 @@ const SPECS_GROUP_SCHEMA = {
     owner: { type: ["string", "null"] },
     version: { type: "string", description: "auto-incremented on every re-POST of the same id" },
     signature: { type: "object", description: "present only when CTCL_SIGN_KEY is configured; Ed25519 over id|canonical_json(members,owner,version)|updated_at (§31.1), re-signed on every version bump", properties: { alg: { const: "Ed25519" }, key_id: { type: "string" }, signed_fields: { type: "string" }, value: { type: "string" }, verify: { type: "string" } } },
+  },
+};
+
+const SPECS_WORKSPACE_SCHEMA = {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://commoninstant.org/ai/specs/workspace-schema.json",
+  title: "CTCL Shared Workspace (Phase 5 Step 1)", type: "object", required: ["id"],
+  description: "Bundles existing system/group ids under one shareable id for team/multi-agent coordination. NO access control — same public-write model as every other CTCL resource; this is a namespacing convenience, not an auth boundary. Real accounts/role-permissions are a deliberately separate, not-yet-built later step.",
+  properties: {
+    id: { type: "string", description: "e.g. workspace:project-alpha" },
+    name: { type: ["string", "null"], description: "human-readable label, optional" },
+    systems: { type: "array", items: { type: "string" }, description: "stored custom system ids" },
+    groups: { type: "array", items: { type: "string" }, description: "stored Temporal Group ids" },
+    owner: { type: ["string", "null"], description: "freeform label, not enforced (no accounts exist to enforce it against)" },
+    version: { type: "string", description: "auto-incremented on every re-POST of the same id" },
+    signature: { type: "object", description: "present only when CTCL_SIGN_KEY is configured; Ed25519 over id|canonical_json(name,systems,groups,owner,version)|updated_at (§31.1), re-signed on every version bump", properties: { alg: { const: "Ed25519" }, key_id: { type: "string" }, signed_fields: { type: "string" }, value: { type: "string" }, verify: { type: "string" } } },
   },
 };
 
@@ -2290,7 +2459,7 @@ function toolsCatalog(origin) {
     "$schema": "aicl-capability/0.1",
     generated_from: "same source as /ai/ctcl.json — cannot drift from it",
     error_schema: "/ai/specs/error-schema.json",
-    schemas: { instant: "/ai/specs/instant-schema.json", system: "/ai/specs/system-schema.json", group: "/ai/specs/group-schema.json" },
+    schemas: { instant: "/ai/specs/instant-schema.json", system: "/ai/specs/system-schema.json", group: "/ai/specs/group-schema.json", workspace: "/ai/specs/workspace-schema.json" },
     rate_limit: "120 requests/min per IP on /v1/* (whitepaper section 38)",
     permission: "public — no auth required, subject to the rate limit above",
     tools: decl.tools,
@@ -2532,6 +2701,7 @@ function aiFileRegistry(origin) {
     "/ai/specs/error-schema.json": { type: "json", body: SPECS_ERROR_SCHEMA },
     "/ai/specs/system-schema.json": { type: "json", body: SPECS_SYSTEM_SCHEMA },
     "/ai/specs/group-schema.json": { type: "json", body: SPECS_GROUP_SCHEMA },
+    "/ai/specs/workspace-schema.json": { type: "json", body: SPECS_WORKSPACE_SCHEMA },
     "/ai/tools/catalog.json": { type: "json", body: toolsCatalog(origin) },
     "/ai/tools/tools.md": { type: "md", body: AI_TOOLS_MD },
     "/ai/governance/license.md": { type: "md", body: GOV_LICENSE_MD },
@@ -2600,6 +2770,13 @@ export default {
       const rest = decodeURIComponent(p.slice(20));
       if (rest.endsWith("/expand")) return expandGroup(rest.slice(0, -7), request, env);
       return getGroup(rest, env);
+    }
+    if (p === "/v1/workspaces" && request.method === "POST") return createWorkspace(request, env);
+    if (p === "/v1/workspaces" && request.method === "GET") return listWorkspaces(env);
+    if (p.startsWith("/v1/workspaces/")) {
+      const rest = decodeURIComponent(p.slice(15));
+      if (rest.endsWith("/expand")) return expandWorkspace(rest.slice(0, -7), request, env);
+      return getWorkspace(rest, env);
     }
     if (p === "/v1/boundaries/inspect" && request.method === "POST") return inspectBoundary(request, env);
     if (p === "/v1/resolve" && request.method === "POST") return handleResolve(request);
