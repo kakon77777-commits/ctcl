@@ -23,6 +23,6 @@
   // so they live here in plain config. The matching *_CLIENT_SECRET values are
   // Cloudflare secrets (wrangler secret put) and never appear in this repo.
   "vars": {
-    "GOOGLE_CLIENT_ID": "463539464579-e62nl5778opnv4pbcn4l6pcvcf2qe20p.apps.googleusercontent.com"
+    "GOOGLE_CLIENT_ID": "964057440001-nhblgv5itjr3huvigr2nkossnrpjri5p.apps.googleusercontent.com"
   }
 }
